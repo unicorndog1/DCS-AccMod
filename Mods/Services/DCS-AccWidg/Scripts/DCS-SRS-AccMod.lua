@@ -53,6 +53,34 @@ local _lastReceived = 0
 local WIDTH = 420
 local HEIGHT = 220
 
+-- Color list for cycling
+local COLOR_LIST = {
+	"Red",
+	"Black",
+	"White",
+	"Green",
+	"Blue",
+	"Yellow",
+	"Orange",
+	"Cyan",
+	"Magenta",
+	"Purple"
+}
+
+-- Color hex values for text (format: 0xRRGGBBAA)
+local COLOR_MAP = {
+	Red = "0xff0000ff",
+	Black = "0x000000ff",
+	White = "0xffffffff",
+	Green = "0x00ff00ff",
+	Blue = "0x0000ffff",
+	Yellow = "0xffff00ff",
+	Orange = "0xff8000ff",
+	Cyan = "0x00ffffff",
+	Magenta = "0xff00ffff",
+	Purple = "0x8000ffff"
+}
+
 
 
 local AccOverlay = { 
@@ -88,7 +116,7 @@ function serializeTable(val, name, skipnewlines, depth)
     return tmp
 end
 AccOverlay = {};AccOverlay.__index = AccOverlay
-function AccOverlay.new(filename,func,form,mod)
+function AccOverlay.new(filename,func,form,transform)
 		o={}
 		
       setmetatable(o, AccOverlay)
@@ -102,7 +130,7 @@ function AccOverlay.new(filename,func,form,mod)
 		o.filename = filename or "bazinga"
 		o.func = func or nil
 		o.form = form or "%d"
-		o.mod  = mod or 1
+		o.transform = transform or nil
       return o 
 end
 
@@ -122,15 +150,19 @@ function AccOverlay:loadConfiguration()
     else
         self:log("Configuration not found, creating defaults...")
         self.config = {
-            mode = "hidden",
+            mode = "full",
             restoreAfterRestart = true,
             hotkey = "Ctrl+Shift+1",
             windowPosition = { x = 200, y = 200 },
 			fontSize = 40,
 			opacity = 0.5,
-			func = "",
-			windowHeight = HEIGHT
+			func = self.func or "",
+			format = self.form or "%.2f",
+			transformName = "",
+			windowHeight = HEIGHT,
+			colorIndex = 1
         }
+        
         self:saveConfiguration()
     end
     -- migration for config values added during an update
@@ -141,6 +173,30 @@ function AccOverlay:loadConfiguration()
     if self.config and self.config.windowHeight == nil then
         self.config.windowHeight = HEIGHT
         self:saveConfiguration()
+    end
+    if self.config and self.config.colorIndex == nil then
+        self.config.colorIndex = 1
+        self:saveConfiguration()
+    end
+    if self.config and self.config.format == nil then
+        self.config.format = self.form or "%.2f"
+        self:saveConfiguration()
+    end
+    if self.config and self.config.transformName == nil then
+        self.config.transformName = ""
+        if self.transform == tomiles then
+            self.config.transformName = "tomiles"
+        elseif self.transform == tofeet then
+            self.config.transformName = "tofeet"
+        end
+        self:saveConfiguration()
+    end
+    
+    -- Apply config values to instance
+    self.func = self.config.func
+    self.form = self.config.format
+    if self.config.transformName and self.config.transformName ~= "" then
+        self.transform = _G[self.config.transformName]
     end
 end
 
@@ -164,6 +220,14 @@ function AccOverlay:error(str)
     log.write('AccMod', log.ERROR, str)
 end
 
+-- Stub method for applying text color - to be implemented
+function AccOverlay:applyTextColor()
+    -- Trigger repaint to apply the new color
+    self:paintRadio()
+    local colorName = COLOR_LIST[self.config.colorIndex] or "Red"
+    self:log("Applied text color: " .. colorName)
+end
+
 
 function combochange(amself)
 	return function (comboself,item)
@@ -172,6 +236,7 @@ function combochange(amself)
 			out = item:getText()
 		end
 		amself.config.func = out
+		amself.func = out
 		amself:paintRadio()
 		amself:saveConfiguration()
 		
@@ -213,18 +278,31 @@ function AccOverlay:paintRadio()
 	local textSkin = pNoVisible.eRedText:getSkin()
 	textSkin.skinData.states.released[1].text.fontSize = self.config.fontSize
 	
+	-- Apply current color from config
+	local colorIndex = self.config.colorIndex or 1
+	local colorName = COLOR_LIST[colorIndex]
+	local colorHex = COLOR_MAP[colorName] or COLOR_MAP["Red"]
+	textSkin.skinData.states.released[1].text.color = colorHex
+	
 	-- Update window title to match selected function or filename
 	if self.window then
-		local title = (self.config.func and self.config.func ~= "") and self.config.func or self.filename
+		local title = (self.config.func and self.config.func ~= "") and self.config.func or "-"
 		self.window:setText(title)
 	end
 	
+	-- Update color button text to reflect current color
+	if self.buttonColor then
+		local colorIndex = self.config.colorIndex or 1
+		self.buttonColor:setText("Color: " .. COLOR_LIST[colorIndex])
+	end
+	
 	local winHeight = self.config.windowHeight or HEIGHT
-	-- Line 1: Font and Opacity controls at y=140
-	self.buttonDecr:setBounds(10, 140, 80, 20)
-	self.buttonIncr:setBounds(91, 140, 80, 20)
-	self.buttonDecOpa:setBounds(172, 140, 80, 20)
-	self.buttonIncOpa:setBounds(253, 140, 80, 20)
+	-- Line 1: Font, Opacity, and Color controls at y=140
+	self.buttonDecr:setBounds(10, 140, 68, 20)
+	self.buttonIncr:setBounds(79, 140, 68, 20)
+	self.buttonDecOpa:setBounds(148, 140, 68, 20)
+	self.buttonIncOpa:setBounds(217, 140, 68, 20)
+	self.buttonColor:setBounds(286, 140, 134, 20)
 	
 	-- Line 2: Instrument combo at y=160
 	self.comboExport:setBounds(10, 160, 410, 20)
@@ -262,13 +340,6 @@ function AccOverlay:createWindow()
     skinModeFull = pNoVisible.windowModeFull:getSkin()
     skinMinimum = pNoVisible.windowModeMin:getSkin()
 
-    typesMessage =
-    {
-        normal        = pNoVisible.eYellowText:getSkin(),
-        receive       = pNoVisible.eWhiteText:getSkin(),
-        guard         = pNoVisible.eRedText:getSkin(),
-    }
-    
     -- Create single text display widget
     self.textStatic = Static.new()
     self.box:insertWidget(self.textStatic)
@@ -293,6 +364,19 @@ function AccOverlay:createWindow()
 	self.buttonDecOpa = Button.new("- Opacity")
 	self.box:insertWidget(self.buttonDecOpa)
 	self.buttonDecOpa:addChangeCallback(  function () self.config.opacity = math.max(0,self.config.opacity-0.05) end )
+	
+	-- Color cycling button
+	self.buttonColor = Button.new("Color: " .. COLOR_LIST[self.config.colorIndex or 1])
+	self.box:insertWidget(self.buttonColor)
+	local overlayInstance = self
+	self.buttonColor:addChangeCallback(function()
+		-- Cycle to next color
+		overlayInstance.config.colorIndex = (overlayInstance.config.colorIndex or 1) % #COLOR_LIST + 1
+		-- Update button text
+		overlayInstance.buttonColor:setText("Color: " .. COLOR_LIST[overlayInstance.config.colorIndex])
+		overlayInstance:saveConfiguration()
+		overlayInstance:applyTextColor()
+	end)
 	
 	self.comboExport = ComboList.new()
 	self.window:insertWidget(self.comboExport)
@@ -346,12 +430,31 @@ end
 
 function AccOverlay:setMode(mode)
     self:log("setMode called "..mode)
+    
+    local oldMode = self.config.mode
     self.config.mode = mode 
     
     if self.window == nil then
         return
     end
 
+    -- Adjust window position to keep text in same place
+    local x, y = self.window:getPosition()
+    local yOffset = 0
+    
+    -- If switching from full to minimal, move up 20 pixels
+    if oldMode == _modes.full and mode ~= _modes.full then
+        yOffset = 20
+    -- If switching from minimal to full, move down 20 pixels
+    elseif oldMode and oldMode ~= _modes.full and mode == _modes.full then
+        yOffset = -20
+    end
+    
+    if yOffset ~= 0 then
+        y = y + yOffset
+        self.config.windowPosition.y = y
+        self.window:setPosition(x, y)
+    end
     
     if self.config.mode == _modes.hidden then
 
@@ -380,6 +483,7 @@ function AccOverlay:setMode(mode)
 			self.buttonDecr:setVisible(false)
 			self.buttonDecOpa:setVisible(false)
 			self.buttonIncOpa:setVisible(false)
+			self.buttonColor:setVisible(false)
             --  DCS.banMouse(false)
 			self.comboExport:setVisible(false)
 			--self.window:setOpacity(self.config.opacity or 0.95)
@@ -397,6 +501,7 @@ function AccOverlay:setMode(mode)
 			self.buttonDecr:setVisible(true)
 			self.buttonDecOpa:setVisible(true)
 			self.buttonIncOpa:setVisible(true)
+			self.buttonColor:setVisible(true)
 			self.comboExport:setVisible(true)
         end    
     end
@@ -465,13 +570,33 @@ function AccModOverlayManager:loadConfiguration()
         if tbl.config.globalMode then
             self.globalMode = tbl.config.globalMode
         end
+        
+        -- Load panels from config (just filenames)
+        if tbl.config.panels then
+            for _, filename in ipairs(tbl.config.panels) do
+                -- Load the individual panel config to get its settings
+                local panelConfigPath = lfs.writedir() .. 'Config/' .. filename .. ' .lua'
+                local panelTbl = Tools.safeDoFile(panelConfigPath, false)
+                if panelTbl and panelTbl.config then
+                    local cfg = panelTbl.config
+                    local transformFunc = nil
+                    if cfg.transformName and cfg.transformName ~= "" then
+                        transformFunc = _G[cfg.transformName]
+                    end
+                    self:createPanel(cfg.func or "", cfg.format or "%.2f", transformFunc, filename)
+                end
+            end
+        end
     else
         self.managerConfig = {
             managerVisible = true,
             windowPosition = { x = 0, y = 0 },
-            globalMode = "hidden"
+            globalMode = "visible",
+            panels = {}
         }
-        self.globalMode = "hidden"
+    
+        self.globalMode = "visible"
+
         self:saveConfiguration()
     end
 end
@@ -479,6 +604,13 @@ end
 function AccModOverlayManager:saveConfiguration()
     if self.managerConfig then
         self.managerConfig.globalMode = self.globalMode
+        
+        -- Save panel list (just filenames - individual configs have all the details)
+        self.managerConfig.panels = {}
+        for _, win in ipairs(self.windows) do
+            table.insert(self.managerConfig.panels, win.filename)
+        end
+        
         U.saveInFile(self.managerConfig, 'config', lfs.writedir() .. 'Config\\AccModManager.lua')
     end
 end
@@ -496,7 +628,7 @@ function AccModOverlayManager:createManagerWindow()
 
 
 	
-	net.log( self.managerWindow)
+	
     local box = self.managerWindow.Box
     pNoVisible  = self.managerWindow.pNoVisible
     skinModeFull = pNoVisible.windowModeFull:getSkin()
@@ -508,18 +640,38 @@ function AccModOverlayManager:createManagerWindow()
     box:setBounds(0, 0, winWidth, winHeight)
     self.managerWindow:setHasCursor(true)
 	
+	-- Restore position from config or center if first time
+	local w, h = Gui.GetWindowSize()
+	if not self.managerConfig.windowPosition or (self.managerConfig.windowPosition.x == 0 and self.managerConfig.windowPosition.y == 0) then
+		-- First time - center the window
+		local posX, posY = math.floor((w - winWidth) / 2), math.floor((h - winHeight) / 2)
+		self.managerConfig.windowPosition = { x = posX, y = posY }
+	end
+	
 	-- Manager window must stay visible to receive hotkeys, but hide it off-screen when not in full mode
 	local shouldShow = (self.globalMode == _modes.full)
 	if shouldShow then
-		-- Show manager window in center of screen
-		local w, h = Gui.GetWindowSize()
-		local posX, posY = math.floor((w - winWidth) / 2), math.floor((h - winHeight) / 2)
-		self.managerWindow:setBounds(posX, posY, winWidth, winHeight)
+		-- Show manager window at saved position
+		self.managerWindow:setBounds(self.managerConfig.windowPosition.x, self.managerConfig.windowPosition.y, winWidth, winHeight)
 	else
 		-- Keep visible but move off-screen so hotkeys still work
 		self.managerWindow:setBounds(-10000, -10000, winWidth, winHeight)
 	end
 	self.managerWindow:setVisible(true)  -- Always visible to receive hotkeys
+	
+	-- Add position callback to save window position when moved
+	local managerInstance = self
+	self.managerWindow:addPositionCallback(function()
+		local x, y = managerInstance.managerWindow:getPosition()
+		-- Only save position if window is actually visible (not off-screen)
+		if x > -5000 and y > -5000 then
+			x = math.max(math.min(x, w - winWidth), 0)
+			y = math.max(math.min(y, h - winHeight), 0)
+			managerInstance.managerWindow:setPosition(x, y)
+			managerInstance.managerConfig.windowPosition = { x = x, y = y }
+			managerInstance:saveConfiguration()
+		end
+	end)
     
     -- listbox showing all current overlays
     self.listOverlays = ComboList.new()
@@ -618,7 +770,7 @@ end
 
 function AccModOverlayManager:createPanel(funcName, format, transform, filename)
     local newWindow = AccOverlay.new(
-        filename or ("config"..(#self.windows+1)),
+        filename or ("AccModDisplay"..(math.random(9999999))),
         funcName,
         format or "%.2f",
         transform or nil
@@ -638,14 +790,15 @@ function AccModOverlayManager:createPanel(funcName, format, transform, filename)
                 win:setMode(self.globalMode)
             end
         end
-        -- Show manager window
+        -- Show manager window at saved position
         if self.managerWindow then
-            local w, h = Gui.GetWindowSize()
-            local winWidth, winHeight = 320, 170
-            local posX, posY = math.floor((w - winWidth) / 2), math.floor((h - winHeight) / 2)
-            self.managerWindow:setBounds(posX, posY, winWidth, winHeight)
+            local posX = self.managerConfig.windowPosition.x
+            local posY = self.managerConfig.windowPosition.y
+            self.managerWindow:setBounds(posX, posY, 320, 170)
         end
         self:saveConfiguration()
+    else
+        -- Loading from config - just store the window info, will be created in onSimulationFrame
     end
 end
 
@@ -659,6 +812,9 @@ function AccModOverlayManager:removePanel(index)
         local configPath = lfs.writedir() .. win:getFileName()
         os.remove(configPath)
         table.remove(self.windows, index)
+        
+        -- Save updated panel list
+        self:saveConfiguration()
     end
 end
 function AccModOverlayManager.onHotKey()
@@ -688,11 +844,10 @@ function AccModOverlayManager.onHotKey()
         if AccModOverlayManager.managerWindow then
             local shouldShow = (AccModOverlayManager.globalMode == _modes.full)
             if shouldShow then
-                -- Show manager window in center of screen
-                local w, h = Gui.GetWindowSize()
-                local winWidth, winHeight = 320, 170
-                local posX, posY = math.floor((w - winWidth) / 2), math.floor((h - winHeight) / 2)
-                AccModOverlayManager.managerWindow:setBounds(posX, posY, winWidth, winHeight)
+                -- Show manager window at saved position
+                local posX = AccModOverlayManager.managerConfig.windowPosition.x
+                local posY = AccModOverlayManager.managerConfig.windowPosition.y
+                AccModOverlayManager.managerWindow:setBounds(posX, posY, 320, 170)
             else
                 -- Keep visible but move off-screen so hotkeys still work
                 AccModOverlayManager.managerWindow:setBounds(-10000, -10000, 320, 170)
@@ -736,8 +891,7 @@ function tofeet(x)
 end
 
 -- create initial panels via the manager so they can be managed (created/removed) uniformly
-AccModOverlayManager:createPanel("LoGetTrueAirSpeed","%.2f",tomiles,"config1")
-AccModOverlayManager:createPanel("LoGetAltitudeAboveGroundLevel","%.2f",tofeet,"config2")
+
 -- create the manager window at startup so it's immediately available
 AccModOverlayManager:createManagerWindow()
 DCS.setUserCallbacks(AccModOverlayManager)
