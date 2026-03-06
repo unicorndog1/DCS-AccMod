@@ -20,13 +20,16 @@ if not exist "%DCS_FOLDER%" (
 REM Create/clear uninstall tracking file
 echo. > "%DCS_FOLDER%\uninstall.txt"
 
-REM Copy all folders from current directory to DCS folder
-echo Copying folders to %DCS_FOLDER%...
-for /d %%D in (*) do (
-    echo Copying %%D...
-    xcopy "%%D" "%DCS_FOLDER%\%%D" /E /I /Y
-   
- 
+
+REM Copy only Mods and Scripts directories to DCS folder
+echo Copying Mods and Scripts to %DCS_FOLDER%...
+for %%D in (Mods Scripts) do (
+    if exist "%%D" (
+        echo Copying %%D...
+        xcopy "%%D" "%DCS_FOLDER%\%%D" /E /I /Y
+    ) else (
+        echo Directory %%D does not exist, skipping. Ensure you have unzipped the archive correctly.
+    )
 )
 
 echo.
