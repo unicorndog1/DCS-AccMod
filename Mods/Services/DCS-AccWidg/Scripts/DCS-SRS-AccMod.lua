@@ -51,7 +51,16 @@ local _lastReceived = 0
 ]]
 
 local WIDTH = 420
-local HEIGHT = 220
+local HEIGHT = 260
+
+-- Transform functions defined early so they can be referenced
+function tomiles(x)
+  return x * 1.94384   
+end
+
+function tofeet(x)
+  return x*3.28084
+end
 
 -- Color list for cycling
 local COLOR_LIST = {
@@ -81,7 +90,12 @@ local COLOR_MAP = {
 	Purple = "0x8000ffff"
 }
 
-
+-- Transform functions table with direct function references
+local TRANSFORM_FUNCTIONS = {
+	{name = "None", func = nil, funcName = ""},
+	{name = "Km->Miles", func = tomiles, funcName = "tomiles"},
+	{name = "M->Feet", func = tofeet, funcName = "tofeet"}
+}
 
 local AccOverlay = { 
   
@@ -183,12 +197,7 @@ function AccOverlay:loadConfiguration()
         self:saveConfiguration()
     end
     if self.config and self.config.transformName == nil then
-        self.config.transformName = ""
-        if self.transform == tomiles then
-            self.config.transformName = "tomiles"
-        elseif self.transform == tofeet then
-            self.config.transformName = "tofeet"
-        end
+        self.config.transformName = tostring(self.transform )
         self:saveConfiguration()
     end
     
@@ -196,7 +205,13 @@ function AccOverlay:loadConfiguration()
     self.func = self.config.func
     self.form = self.config.format
     if self.config.transformName and self.config.transformName ~= "" then
-        self.transform = _G[self.config.transformName]
+        -- Look up transform by name
+        for _, tf in ipairs(TRANSFORM_FUNCTIONS) do
+            if tf.funcName == self.config.transformName then
+                self.transform = tf.func
+                break
+            end
+        end
     end
 end
 
@@ -243,6 +258,33 @@ function combochange(amself)
 		-- update the manager list to reflect the new function name
 		if AccModOverlayManager and AccModOverlayManager.managerWindow then
 			AccModOverlayManager:refreshOverlayList()
+		end
+	end
+end
+
+function transformchange(amself)
+	return function (comboself, item)
+		if item then
+			local displayName = item:getText()
+			amself:log("Transform combo changed to: " .. tostring(displayName))
+			
+			-- Look up the actual function in TRANSFORM_FUNCTIONS
+			local transformFunc = nil
+			local transformName = ""
+			for _, tf in ipairs(TRANSFORM_FUNCTIONS) do
+				if tf.name == displayName then
+					transformFunc = tf.func
+					transformName = tf.funcName
+					amself:log("Found transform function: " .. tostring(transformName) .. ", func type: " .. type(transformFunc))
+					break
+				end
+			end
+			
+			amself.config.transformName = transformName
+			amself.transform = transformFunc
+			amself:log("Set transformName=" .. tostring(transformName) .. ", transform type=" .. type(amself.transform))
+			amself:paintRadio()
+			amself:saveConfiguration()
 		end
 	end
 end
@@ -309,6 +351,23 @@ function AccOverlay:paintRadio()
 	
 	if self.config.func then
 		self.comboExport:setText(self.config.func)
+	end
+	
+	-- Line 3: Transform combo at y=180
+	self.comboTransform:setBounds(10, 180, 410, 20)
+	
+	if self.config.transformName and self.config.transformName ~= "" then
+		-- Look up display name from function name
+		local displayName = "None"
+		for _, tf in ipairs(TRANSFORM_FUNCTIONS) do
+			if tf.funcName == self.config.transformName then
+				displayName = tf.name
+				break
+			end
+		end
+		self.comboTransform:setText(displayName)
+	else
+		self.comboTransform:setText("None")
 	end
 
     -- Update text display widget
@@ -380,15 +439,29 @@ function AccOverlay:createWindow()
 	
 	self.comboExport = ComboList.new()
 	self.window:insertWidget(self.comboExport)
-
+    local sortme = {}
 	for k, v in pairs(base.Export) do
 		if type(v) == "function" then
-		
-			self.comboExport:newItem(tostring(k))
+            table.insert(sortme, k)
 		end
 	end
 	
+	-- Sort alphabetically
+	table.sort(sortme)
+
+    for _, f in ipairs(sortme) do
+        self.comboExport:newItem(f)
+    end
+	
 	self.comboExport.onChange = combochange(self)
+	
+	-- Transform function selector
+	self.comboTransform = ComboList.new()
+	self.window:insertWidget(self.comboTransform)
+	for _, tf in ipairs(TRANSFORM_FUNCTIONS) do
+		self.comboTransform:newItem(tf.name)
+	end
+	self.comboTransform.onChange = transformchange(self)
     w, h = Gui.GetWindowSize()
             
     self:resize(w, h)
@@ -486,6 +559,7 @@ function AccOverlay:setMode(mode)
 			self.buttonColor:setVisible(false)
             --  DCS.banMouse(false)
 			self.comboExport:setVisible(false)
+			self.comboTransform:setVisible(false)
 			--self.window:setOpacity(self.config.opacity or 0.95)
         end
         
@@ -503,6 +577,7 @@ function AccOverlay:setMode(mode)
 			self.buttonIncOpa:setVisible(true)
 			self.buttonColor:setVisible(true)
 			self.comboExport:setVisible(true)
+			self.comboTransform:setVisible(true)
         end    
     end
 
@@ -581,7 +656,13 @@ function AccModOverlayManager:loadConfiguration()
                     local cfg = panelTbl.config
                     local transformFunc = nil
                     if cfg.transformName and cfg.transformName ~= "" then
-                        transformFunc = _G[cfg.transformName]
+                        -- Look up transform by name from TRANSFORM_FUNCTIONS table
+                        for _, tf in ipairs(TRANSFORM_FUNCTIONS) do
+                            if tf.funcName == cfg.transformName then
+                                transformFunc = tf.func
+                                break
+                            end
+                        end
                     end
                     self:createPanel(cfg.func or "", cfg.format or "%.2f", transformFunc, filename)
                 end
