@@ -51,7 +51,7 @@ local _lastReceived = 0
 ]]
 
 local WIDTH = 420
-local HEIGHT = 200
+local HEIGHT = 220
 
 
 
@@ -95,8 +95,8 @@ function AccOverlay.new(filename,func,form,mod)
 		o._isWindowCreated = false
 		o._listenSocket = {}
 	
-		o._listStatics = {} -- placeholder objects
-		o._listMessages = {} -- data
+		o.textStatic = nil -- single text widget
+		o.currentMessage = "" -- single message string
 		o._lastReceived = 0
 		o._last = 0
 		o.filename = filename or "bazinga"
@@ -122,19 +122,24 @@ function AccOverlay:loadConfiguration()
     else
         self:log("Configuration not found, creating defaults...")
         self.config = {
-            mode = "full",
+            mode = "hidden",
             restoreAfterRestart = true,
             hotkey = "Ctrl+Shift+1",
             windowPosition = { x = 200, y = 200 },
 			fontSize = 40,
 			opacity = 0.5,
-			func = ""
+			func = "",
+			windowHeight = HEIGHT
         }
         self:saveConfiguration()
     end
     -- migration for config values added during an update
     if self.config and self.config.restoreAfterRestart == nil then
         self.config.restoreAfterRestart = true
+        self:saveConfiguration()
+    end
+    if self.config and self.config.windowHeight == nil then
+        self.config.windowHeight = HEIGHT
         self:saveConfiguration()
     end
 end
@@ -169,7 +174,11 @@ function combochange(amself)
 		amself.config.func = out
 		amself:paintRadio()
 		amself:saveConfiguration()
-	
+		
+		-- update the manager list to reflect the new function name
+		if AccModOverlayManager and AccModOverlayManager.managerWindow then
+			AccModOverlayManager:refreshOverlayList()
+		end
 	end
 end
 
@@ -177,13 +186,6 @@ end
 
 function AccOverlay:paintRadio()
 
-    local offset = 0
-   
-    for k,v in pairs(self._listStatics) do
-
-        v:setText("")
-    end
-	self._listMessages  = {}	
 	local t
 
 	if self.config.func and base.Export[self.config.func] then
@@ -193,7 +195,7 @@ function AccOverlay:paintRadio()
 		t = -1
 	end
 	local x = ""
-	--table.insert(self._listMessages , {message = "IAS", skin =typesMessage.guard, height = 50 })
+
 	if t then
 
 		if self.transform then
@@ -208,34 +210,37 @@ function AccOverlay:paintRadio()
 		x = "-"
 	end
 	
-	local curStatic = 1
-	t= pNoVisible.eRedText:getSkin()
-
-	t.skinData.states.released[1].text.fontSize = self.config.fontSize
-	table.insert(self._listMessages , {message = x, skin =t, height = HEIGHT -100   })
+	local textSkin = pNoVisible.eRedText:getSkin()
+	textSkin.skinData.states.released[1].text.fontSize = self.config.fontSize
+	
+	-- Update window title to match selected function or filename
+	if self.window then
+		local title = (self.config.func and self.config.func ~= "") and self.config.func or self.filename
+		self.window:setText(title)
+	end
+	
+	local winHeight = self.config.windowHeight or HEIGHT
+	-- Line 1: Font and Opacity controls at y=140
+	self.buttonDecr:setBounds(10, 140, 80, 20)
+	self.buttonIncr:setBounds(91, 140, 80, 20)
+	self.buttonDecOpa:setBounds(172, 140, 80, 20)
+	self.buttonIncOpa:setBounds(253, 140, 80, 20)
+	
+	-- Line 2: Instrument combo at y=160
+	self.comboExport:setBounds(10, 160, 410, 20)
 	
 	if self.config.func then
 		self.comboExport:setText(self.config.func)
 	end
-	
-	
-	self.buttonDecr:setBounds(10,HEIGHT -100,80,20)
-	self.buttonIncr:setBounds(81,HEIGHT -100,80,20)
-	self.buttonDecOpa:setBounds(161,HEIGHT -100,80,20)
-	self.buttonIncOpa:setBounds(241,HEIGHT -100,80,20)
-	self.comboExport:setBounds(340,HEIGHT -100,80,20)
 
-
-    for _i,_msg in pairs(self._listMessages ) do		
-        if(_msg~=nil and _msg.message ~= nil and  self._listStatics[curStatic] ~= nil ) then
-            self._listStatics[curStatic]:setSkin(_msg.skin)
-            self._listStatics[curStatic]:setBounds(10,offset,WIDTH-10,_msg.height)
-            self._listStatics[curStatic]:setText(_msg.message)
-			self._listStatics[curStatic]:setOpacity(self.config.opacity)
-            --10 padding
-            offset = offset +20
-            curStatic = curStatic +1
-        end
+    -- Update text display widget
+	self.currentMessage = x
+    if self.textStatic and self.currentMessage then
+        self.textStatic:setSkin(textSkin)
+        self.textStatic:setBounds(10, 0, WIDTH-10, 130)
+        self.textStatic:setText(self.currentMessage)
+		self.textStatic:setVisible(true)
+		self.textStatic:setOpacity(self.config.opacity)
     end
 	
 
@@ -250,6 +255,10 @@ function AccOverlay:createWindow()
 
     self.window:setVisible(true) -- if you make the self.window invisible, its destroyed
     
+    -- Set initial window title
+    local title = (self.config and self.config.func and self.config.func ~= "") and self.config.func or self.filename
+    self.window:setText(title)
+    
     skinModeFull = pNoVisible.windowModeFull:getSkin()
     skinMinimum = pNoVisible.windowModeMin:getSkin()
 
@@ -260,16 +269,12 @@ function AccOverlay:createWindow()
         guard         = pNoVisible.eRedText:getSkin(),
     }
     
-    self._listStatics = {}
-    
-    for i = 1, 1 do
-        local staticNew = Static.new()
-        table.insert(self._listStatics, staticNew)
-        self.box:insertWidget(staticNew)
-    end
+    -- Create single text display widget
+    self.textStatic = Static.new()
+    self.box:insertWidget(self.textStatic)
 	
 	
-	self.buttonIncr = Button.new("+ Fosdfndt")
+	self.buttonIncr = Button.new("+ Font")
 	self.box:insertWidget(self.buttonIncr)
 
 	
@@ -282,12 +287,12 @@ function AccOverlay:createWindow()
 	
 	self.buttonIncOpa = Button.new("+ Opacity")
 	self.box:insertWidget(self.buttonIncOpa)
-	self.buttonIncOpa:addChangeCallback(  function () self.config.opacity = math.max(0,self.config.opacity-0.05) end )
+	self.buttonIncOpa:addChangeCallback(  function () self.config.opacity = math.min(1,self.config.opacity+0.05) end )
 	
 	
 	self.buttonDecOpa = Button.new("- Opacity")
 	self.box:insertWidget(self.buttonDecOpa)
-	self.buttonDecOpa:addChangeCallback(  function () self.config.opacity = math.min(1,self.config.opacity+0.05) end )
+	self.buttonDecOpa:addChangeCallback(  function () self.config.opacity = math.max(0,self.config.opacity-0.05) end )
 	
 	self.comboExport = ComboList.new()
 	self.window:insertWidget(self.comboExport)
@@ -311,6 +316,21 @@ function AccOverlay:createWindow()
 	curry = self:positionCallback()
     self.window:addPositionCallback(curry)     
 	curry()
+
+    -- Debug hotkeys for window size adjustment
+    self.window:addHotKeyCallback("Ctrl+Up", function()
+        self.config.windowHeight = self.config.windowHeight + 20
+        self:saveConfiguration()
+        self:resize(w, h)
+        self:log("Window height increased to " .. self.config.windowHeight)
+    end)
+    
+    self.window:addHotKeyCallback("Ctrl+Down", function()
+        self.config.windowHeight = math.max(150, self.config.windowHeight - 20)
+        self:saveConfiguration()
+        self:resize(w, h)
+        self:log("Window height decreased to " .. self.config.windowHeight)
+    end)
 
     self._isWindowCreated = true
 
@@ -433,8 +453,39 @@ AccModOverlayManager = {
     windows = {},
     first = true,
     managerWindow = nil, -- new GUI for creating/removing panels
+    managerConfig = nil,
+    globalMode = "hidden" -- global mode for all panels
 }
+
+function AccModOverlayManager:loadConfiguration()
+    local tbl = Tools.safeDoFile(lfs.writedir() .. 'Config\\AccModManager.lua', false)
+    if tbl and tbl.config then
+        self.managerConfig = tbl.config
+        -- Load global mode from manager config
+        if tbl.config.globalMode then
+            self.globalMode = tbl.config.globalMode
+        end
+    else
+        self.managerConfig = {
+            managerVisible = true,
+            windowPosition = { x = 0, y = 0 },
+            globalMode = "hidden"
+        }
+        self.globalMode = "hidden"
+        self:saveConfiguration()
+    end
+end
+
+function AccModOverlayManager:saveConfiguration()
+    if self.managerConfig then
+        self.managerConfig.globalMode = self.globalMode
+        U.saveInFile(self.managerConfig, 'config', lfs.writedir() .. 'Config\\AccModManager.lua')
+    end
+end
 function AccModOverlayManager:createManagerWindow()
+    -- Load manager configuration
+    self:loadConfiguration()
+    
     -- if already created, just ensure it's visible and return
     if self.managerWindow then 
         self.managerWindow:setVisible(true)
@@ -452,66 +503,107 @@ function AccModOverlayManager:createManagerWindow()
     skinMinimum = pNoVisible.windowModeMin:getSkin()
 	box:setSkin(skinModeFull)
 
-    -- size and position manager window so it is clearly visible
-    local w, h = Gui.GetWindowSize()
-    local winWidth, winHeight = 320, 140
-    local posX, posY = math.floor((w - winWidth) / 2), math.floor((h - winHeight) / 2)
-    self.managerWindow:setBounds(posX, posY, winWidth, winHeight)
+    -- size and position manager window
+    local winWidth, winHeight = 320, 170
     box:setBounds(0, 0, winWidth, winHeight)
     self.managerWindow:setHasCursor(true)
-	self.managerWindow:setVisible(true)
+	
+	-- Manager window must stay visible to receive hotkeys, but hide it off-screen when not in full mode
+	local shouldShow = (self.globalMode == _modes.full)
+	if shouldShow then
+		-- Show manager window in center of screen
+		local w, h = Gui.GetWindowSize()
+		local posX, posY = math.floor((w - winWidth) / 2), math.floor((h - winHeight) / 2)
+		self.managerWindow:setBounds(posX, posY, winWidth, winHeight)
+	else
+		-- Keep visible but move off-screen so hotkeys still work
+		self.managerWindow:setBounds(-10000, -10000, winWidth, winHeight)
+	end
+	self.managerWindow:setVisible(true)  -- Always visible to receive hotkeys
+    
     -- listbox showing all current overlays
     self.listOverlays = ComboList.new()
     box:insertWidget(self.listOverlays)
     self.listOverlays:setBounds(10, 10, 200, 22)
+    
+    -- Add hotkey display text
+    local hotkeyText = Static.new()
+    box:insertWidget(hotkeyText)
+    hotkeyText:setBounds(10, 38, 300, 20)
+    hotkeyText:setText("Show/Transparent/Hide Shortcut: Ctrl+Shift+1")
+    local textSkin = pNoVisible.eWhiteText:getSkin()
+    textSkin.skinData.states.released[1].text.fontSize = 12
+    hotkeyText:setSkin(textSkin)
 
-    -- populate list
+    -- populate list with window titles (ensure configs are loaded first)
     for i, win in ipairs(self.windows) do
-        self.listOverlays:newItem(win.filename)
+        -- Load config if not already loaded
+        if not win.config then
+            win:loadConfiguration()
+        end
+        local displayName
+        if win.window then
+            displayName = win.window:getText()
+        else
+            displayName = (win.config and win.config.func and win.config.func ~= "") and win.config.func or win.filename
+        end
+        self.listOverlays:newItem(displayName)
     end
 
     -- Add Panel button
     local btnAdd = Button.new("Add Panel")
     box:insertWidget(btnAdd)
-    btnAdd:setBounds(10, 40, 140, 24)
+    btnAdd:setBounds(10, 70, 140, 28)
+    local managerInstance = self
     btnAdd:addChangeCallback(function()
         -- create a new generic panel; function can be selected in the panel itself
-        self:createPanel(nil, "%.2f", nil)
-        self:refreshOverlayList()
+        managerInstance:createPanel(nil, "%.2f", nil)
+        managerInstance:refreshOverlayList()
     end)
 
     -- Remove Panel button
     local btnRemove = Button.new("Remove Panel")
     box:insertWidget(btnRemove)
-    btnRemove:setBounds(160, 40, 140, 24)
+    btnRemove:setBounds(160, 70, 140, 28)
     btnRemove:addChangeCallback(function()
-        -- get selected item and remove the matching panel by filename
-        local item = self.listOverlays:getSelectedItem()
-        if not item then
-            return
-        end
-        local name = item:getText()
-        if not name then
-            return
-        end
-
-        for i, win in ipairs(self.windows) do
-            if win.filename == name then
-                self:removePanel(i)
+        -- get selected index and remove the panel (ComboList uses 1-based indexing)
+        local item = managerInstance.listOverlays:getSelectedItem()
+        if not item then return end
+        
+        -- Find the index by comparing the display name
+        local selectedText = item:getText()
+        for i, win in ipairs(managerInstance.windows) do
+            local winTitle
+            if win.window then
+                winTitle = win.window:getText()
+            else
+                winTitle = (win.config and win.config.func and win.config.func ~= "") and win.config.func or win.filename
+            end
+            
+            if winTitle == selectedText then
+                managerInstance:removePanel(i)
+                managerInstance:refreshOverlayList()
                 break
             end
         end
-
-        self:refreshOverlayList()
     end)
 
-    self.managerWindow:setVisible(true)
+    -- Register hotkey on manager window so it works even when panels are hidden
+    self.managerWindow:addHotKeyCallback("Ctrl+Shift+1", AccModOverlayManager.onHotKey)
+    net.log("AccMod: Manager window created, hotkey Ctrl+Shift+1 registered, globalMode: " .. tostring(self.globalMode))
 end
 
 function AccModOverlayManager:refreshOverlayList()
     self.listOverlays:clear()
     for i, win in ipairs(self.windows) do
-        self.listOverlays:newItem(win.filename)
+        -- Get the display name from the window title if available
+        local displayName
+        if win.window then
+            displayName = win.window:getText()
+        else
+            displayName = (win.config and win.config.func and win.config.func ~= "") and win.config.func or win.filename
+        end
+        self.listOverlays:newItem(displayName)
     end
 end
 
@@ -532,31 +624,80 @@ function AccModOverlayManager:createPanel(funcName, format, transform, filename)
         transform or nil
     )
     table.insert(self.windows, newWindow)
+    
+    -- Load/create config and set to visible if new panel
+    if not filename then  -- only for newly created panels, not loaded ones
+        newWindow:loadConfiguration()
+        newWindow:createWindow()
+        -- Set new panel to global mode
+        self.globalMode = _modes.full
+        newWindow:setMode(self.globalMode)
+        -- Update all other panels to match
+        for _, win in ipairs(self.windows) do
+            if win ~= newWindow and win.window then
+                win:setMode(self.globalMode)
+            end
+        end
+        -- Show manager window
+        if self.managerWindow then
+            local w, h = Gui.GetWindowSize()
+            local winWidth, winHeight = 320, 170
+            local posX, posY = math.floor((w - winWidth) / 2), math.floor((h - winHeight) / 2)
+            self.managerWindow:setBounds(posX, posY, winWidth, winHeight)
+        end
+        self:saveConfiguration()
+    end
 end
 
 function AccModOverlayManager:removePanel(index)
     if self.windows[index] then
         local win = self.windows[index]
         if win.window then
-            win.window:close()
+            win.window:setVisible(false)
         end
+        -- Delete the config file
+        local configPath = lfs.writedir() .. win:getFileName()
+        os.remove(configPath)
         table.remove(self.windows, index)
     end
 end
 function AccModOverlayManager.onHotKey()
-
+		net.log("AccMod: Hotkey pressed! Current mode: " .. tostring(AccModOverlayManager.globalMode))
+		
+		-- Cycle through global mode
+		if AccModOverlayManager.globalMode == _modes.full then
+			AccModOverlayManager.globalMode = _modes.minimum
+		elseif AccModOverlayManager.globalMode == _modes.minimum then
+			AccModOverlayManager.globalMode = _modes.minimum_vol
+		elseif AccModOverlayManager.globalMode == _modes.minimum_vol then
+			AccModOverlayManager.globalMode = _modes.txrx_only
+		elseif AccModOverlayManager.globalMode == _modes.txrx_only then
+			AccModOverlayManager.globalMode = _modes.hidden
+		else
+			AccModOverlayManager.globalMode = _modes.full
+		end
+		
+		net.log("AccMod: Switched to mode: " .. tostring(AccModOverlayManager.globalMode))
+		
+		-- Apply global mode to all panels
 		for _i,_s in pairs(AccModOverlayManager.windows) do
-			_s:onHotkey()
+			_s:setMode(AccModOverlayManager.globalMode)
 		end
 
-        -- show manager window only when overlays are in full mode
+        -- show manager window only when global mode is full
         if AccModOverlayManager.managerWindow then
-            local first = AccModOverlayManager.windows[1]
-            if first and first:getMode() == _modes.full then
-                AccModOverlayManager.managerWindow:setVisible(true)
+            local shouldShow = (AccModOverlayManager.globalMode == _modes.full)
+            if shouldShow then
+                -- Show manager window in center of screen
+                local w, h = Gui.GetWindowSize()
+                local winWidth, winHeight = 320, 170
+                local posX, posY = math.floor((w - winWidth) / 2), math.floor((h - winHeight) / 2)
+                AccModOverlayManager.managerWindow:setBounds(posX, posY, winWidth, winHeight)
             else
-                AccModOverlayManager.managerWindow:setVisible(false)
+                -- Keep visible but move off-screen so hotkeys still work
+                AccModOverlayManager.managerWindow:setBounds(-10000, -10000, 320, 170)
             end
+            AccModOverlayManager:saveConfiguration()
         end
 end
 function AccModOverlayManager.onSimulationFrame()
@@ -569,13 +710,12 @@ function AccModOverlayManager.onSimulationFrame()
 		
 		if not _s.window then
 			if _s._isWindowCreated == false then
+				net.log("AccMod: Creating window for " .. tostring(_s.filename))
 				_s:createWindow()
-				if AccModOverlayManager.first then
-					_s.window:addHotKeyCallback(_s.config.hotkey, AccModOverlayManager.onHotKey)
-				end
-				AccModOverlayManager.first = false
-			end 
-		    _s:setMode(_s.config.mode)
+				-- Apply global mode after window creation
+				_s:setMode(AccModOverlayManager.globalMode)
+				net.log("AccMod: Window created and set to mode: " .. tostring(AccModOverlayManager.globalMode))
+			end
 		end
 
 		
