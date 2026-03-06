@@ -824,11 +824,8 @@ function AccModOverlayManager.onHotKey()
 		if AccModOverlayManager.globalMode == _modes.full then
 			AccModOverlayManager.globalMode = _modes.minimum
 		elseif AccModOverlayManager.globalMode == _modes.minimum then
-			AccModOverlayManager.globalMode = _modes.minimum_vol
-		elseif AccModOverlayManager.globalMode == _modes.minimum_vol then
-			AccModOverlayManager.globalMode = _modes.txrx_only
-		elseif AccModOverlayManager.globalMode == _modes.txrx_only then
-			AccModOverlayManager.globalMode = _modes.hidden
+			AccModOverlayManager.globalMode = _modes.full
+
 		else
 			AccModOverlayManager.globalMode = _modes.full
 		end
