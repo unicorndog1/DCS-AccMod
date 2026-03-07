@@ -10,3 +10,4 @@ The main window appears on first startup, where you can add and remove subpanels
 CREDITS: I used DCS SRS's plugin as a starting point for this mod
 
 ![Alt text](shot1.png)
+![Alt text](shot2.png)
