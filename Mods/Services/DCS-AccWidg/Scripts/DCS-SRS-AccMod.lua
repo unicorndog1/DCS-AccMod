@@ -905,7 +905,7 @@ function AccModOverlayManager.onHotKey()
 		if AccModOverlayManager.globalMode == _modes.full then
 			AccModOverlayManager.globalMode = _modes.minimum
 		elseif AccModOverlayManager.globalMode == _modes.minimum then
-			AccModOverlayManager.globalMode = _modes.full
+			AccModOverlayManager.globalMode = _modes.hidden
 
 		else
 			AccModOverlayManager.globalMode = _modes.full
