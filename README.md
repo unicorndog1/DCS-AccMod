@@ -8,3 +8,5 @@ USAGE:
 The main window appears on first startup, where you can add and remove subpanels.  Each subpanel can show an exported data value selected by the combobox.  When the window is fully visibile, you can adjust font size and opacity.  Ctrl+Shift+1 toggles between full visibility of the window, visibilty of the instrument only and hidden.
 
 CREDITS: I used DCS SRS's plugin as a starting point for this mod
+
+![Alt text](shot1.png)
