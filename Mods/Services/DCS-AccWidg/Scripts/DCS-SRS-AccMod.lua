@@ -97,8 +97,596 @@ local TRANSFORM_FUNCTIONS = {
 	{name = "M->Feet", func = tofeet, funcName = "tofeet"}
 }
 
+<<<<<<< Updated upstream
 local AccOverlay = { 
   
+=======
+-- PDL gauge calibration: meters of deviation per gauge unit
+-- Each gauge position represents this many meters of deviation from center
+-- Positions: -4m, -2m, 0m (center), 2m, 4m with step = 2
+local GAUGE_STEP_METERS = 4
+
+-- ImagePanel class for displaying images in a subpanel
+local ImagePanel = {}
+ImagePanel.__index = ImagePanel
+
+function ImagePanel.new(imagePath)
+    local o = {}
+    setmetatable(o, ImagePanel)
+    o.imagePath = imagePath
+    o.window = nil
+    o.panel = nil
+    o.imageStatic = nil
+    o.deviationText = nil  -- Text widget for showing deviations
+    o.lastUpdateTime = 0
+    o.currentFilename = ""
+    o.tankerUnitName = nil  -- Store the tracked tanker unit name
+    o.lastSearchTime = 0  -- Track when we last searched for a tanker
+    o.mode = _modes.full  -- Current display mode
+    o.xbound = 120
+    o.ybound = 360
+    o.textHeight = 60
+    return o
+end
+
+function ImagePanel:createWindow()
+    -- Create a simple window programmatically
+    local Window = require('Window')
+    self.window = Window.new()
+    self.window:setBounds(100, 100, self.xbound, self.ybound + self.textHeight)
+    self.window:setText("PDL Display")
+    self.window:setSkin(Skin.windowSkinChatWrite())
+    self.window:setVisible(true)
+    self.window:setHasCursor(true)
+    
+    -- Create a panel to hold the widgets
+    self.panel = Panel.new()
+    self.window:insertWidget(self.panel)
+    self.panel:setBounds(0, 0, self.xbound, self.ybound + self.textHeight)
+    
+    -- Create text widget for displaying deviations
+    self.deviationText = Static.new()
+    self.panel:insertWidget(self.deviationText)
+    self.deviationText:setBounds(5, 5, self.xbound - 10, self.textHeight - 10)
+    self.deviationText:setText("No data")
+    
+    -- Create static widget for displaying the image
+    self.imageStatic = Static.new()
+    self.panel:insertWidget(self.imageStatic)
+    self.imageStatic:setBounds(0, self.textHeight, self.xbound, self.ybound)
+    
+    self:updateImage(self.imagePath)
+    
+    log.write('AccMod', log.INFO, "Image panel created with: " .. self.imagePath)
+end
+
+function ImagePanel:updateImage(imagePath)
+    if not self.imageStatic then
+        return
+    end
+    
+    -- Only update if the image has changed
+    if imagePath == self.currentFilename then
+        return
+    end
+    
+    self.currentFilename = imagePath
+    
+    -- Create and apply the picture
+    local Size = require('Size')
+    local picture = Picture.new(
+        lfs.writedir() .. imagePath,
+        "0xffffffff",  -- White color (no tint)
+        nil,            -- Horizontal alignment
+        nil,            -- Vertical alignment
+        Size.new(self.xbound, self.ybound),  -- Size to fit the window
+        nil,            -- Rectangle (full image)
+        nil,            -- userTexSampler
+        true            -- resizeToFill - scale image to fit
+    )
+    
+    -- Apply picture to the static widget's skin
+    local skin = self.imageStatic:getSkin()
+    if not skin.skinData then
+        skin.skinData = { states = { released = { {} } } }
+    end
+    if not skin.skinData.states then
+        skin.skinData.states = { released = { {} } }
+    end
+    if not skin.skinData.states.released then
+        skin.skinData.states.released = { {} }
+    end
+    if not skin.skinData.states.released[1] then
+        skin.skinData.states.released[1] = {}
+    end
+    
+    skin.skinData.states.released[1].picture = picture
+    self.imageStatic:setSkin(skin)
+end
+
+function ImagePanel:updateFromTanker()
+    local now = os.clock()
+    
+    -- Update every 0.5 seconds
+    if now - self.lastUpdateTime < 0.5 then
+        return
+    end
+    
+    self.lastUpdateTime = now
+    
+    -- Get gauge positions from the tracked tanker
+    if self.tankerUnitName then
+        local duPos_, faPos_,f,v,l = getTankerGaugePosition(self.tankerUnitName)
+        local duPos, faPos = getTankerGaugePositionFromDrawArgs(self.tankerUnitName)
+        log.write('AccMod', log.INFO, duPos_ .. "," .. faPos_ .. " vs " .. duPos .. "," .. faPos)
+        log.write('AccMod', log.INFO, string.format("Offsets F:%.2f m, V:%.2f m, L:%.2f m", f,v,l)) 
+        if duPos and faPos then
+            -- Convert positions to filename
+            local filename = positionsToPDLFilename(duPos, faPos)
+            local fullPath = "Mods\\Services\\DCS-AccWidg\\Theme\\" .. filename
+            
+            -- Update the image
+            self:updateImage(fullPath)
+            
+        else
+            -- Tanker no longer available, clear ID and show OFF image
+            log.write('AccMod', log.INFO, "Tanker lost, will re-search in 60 seconds")
+            self:updateImage("Mods\\Services\\DCS-AccWidg\\Theme\\pdl_DUOFF_FAOFF.jpg")
+            if self.deviationText then
+                self.deviationText:setText("No tanker")
+            end
+            self.tankerUnitName = nil
+            self.lastSearchTime = now  -- Start re-search timer
+        end
+    else
+        -- No tanker tracked - check if it's time to search again
+        if now - self.lastSearchTime >= 60 then
+            -- Re-search for tanker every 60 seconds
+            log.write('AccMod', log.INFO, "Re-searching for KC-135 tanker...")
+            local forward, vertical, lateral, distance, tankerID, tankerUnitName = findClosestKC135()
+         
+            self:updateImage("Mods\\Services\\DCS-AccWidg\\Theme\\pdl_DUOFF_FAOFF.jpg")
+           
+            
+            self.lastSearchTime = now
+        else
+            -- Not time to search yet, show OFF image
+            self:updateImage("Mods\\Services\\DCS-AccWidg\\Theme\\pdl_DUOFF_FAOFF.jpg")
+            if self.deviationText then
+                self.deviationText:setText("Searching...")
+            end
+        end
+    end
+end
+
+function ImagePanel:closeWindow()
+    if self.window then
+        self.window:setVisible(false)
+        self.window = nil
+    end
+end
+
+function ImagePanel:setMode(mode)
+    if not self.window then
+        return
+    end
+    
+    self.mode = mode
+    
+    if mode == _modes.hidden or mode == _modes.minimum then
+        -- Hidden/minimum mode: hide title bar and text, show only image
+        self.window:setText("")  -- Empty title bar
+        if self.deviationText then
+            self.deviationText:setVisible(false)
+        end
+        -- Move image to top and resize window to just image size
+        if self.imageStatic then
+            self.imageStatic:setBounds(0, 0, self.xbound, self.ybound)
+        end
+        if self.panel then
+            self.panel:setBounds(0, 0, self.xbound, self.ybound)
+        end
+        -- Get current position and resize window
+        local x, y, _, _ = self.window:getBounds()
+        self.window:setBounds(x, y, self.xbound, self.ybound)
+    else
+        -- Full mode: show title bar and text
+        self.window:setText("PDL Display")
+        if self.deviationText then
+            self.deviationText:setVisible(true)
+        end
+        -- Move image back to below text and resize window to full size
+        if self.imageStatic then
+            self.imageStatic:setBounds(0, self.textHeight, self.xbound, self.ybound)
+        end
+        if self.panel then
+            self.panel:setBounds(0, 0, self.xbound, self.ybound + self.textHeight)
+        end
+        -- Get current position and resize window
+        local x, y, _, _ = self.window:getBounds()
+        self.window:setBounds(x, y, self.xbound, self.ybound + self.textHeight)
+    end
+    
+    log.write('AccMod', log.INFO, "ImagePanel mode set to: " .. tostring(mode))
+end
+
+-- Helper function to build rotation matrix from heading/pitch/bank
+local function buildRotationMatrix(heading, pitch, bank)
+    local cosH = math.cos(heading)
+    local sinH = math.sin(heading)
+    local cosP = math.cos(pitch)
+    local sinP = math.sin(pitch)
+    local cosB = math.cos(bank)
+    local sinB = math.sin(bank)
+    
+    -- Build rotation matrix (Yaw * Pitch * Roll)
+    return {
+        x = { -- Forward vector
+            x = cosH * cosP,
+            y = sinP,
+            z = sinH * cosP
+        },
+        y = { -- Up vector
+            x = cosH * sinP * sinB - sinH * cosB,
+            y = cosP * sinB,
+            z = sinH * sinP * sinB + cosH * cosB
+        },
+        z = { -- Right vector
+            x = cosH * sinP * cosB + sinH * sinB,
+            y = cosP * cosB,
+            z = sinH * sinP * cosB - cosH * sinB
+        }
+    }
+end
+
+-- Function to calculate relative position and convert to PDL parameters
+-- Returns forward/aft, up/down, left/right offsets in meters
+local function calculateRelativePosition(playerPos, tankerPos, tankerHeading, tankerPitch, tankerBank)
+    -- Reference offsets for KC-135 boom contact position (meters from tanker origin)
+    -- Calculated from actual refueling position in dcs.log:
+    -- At stable refueling, offsets were F:-21.53m, V:6.47m, L:-20.21m with old reference
+    -- Old reference was: (-22.5, -6.5, 0)
+    -- Actual position = offset + old_reference = (-21.53-22.5, 6.47-6.5, -20.21+0) = (-44.03, -0.03, -20.21)
+    local refForward = 0  -- 44m behind tanker origin
+    local refVertical = 0.0   -- at tanker centerline height
+    local refLateral = 0  -- 20m left of centerline
+    
+    -- Build tanker orientation matrix
+    local tankerMat = buildRotationMatrix(tankerHeading, tankerPitch, tankerBank)
+    
+    -- Relative vector from tanker origin to player
+    local rel = {
+        x = playerPos.x - tankerPos.x,
+        y = playerPos.y - tankerPos.y,
+        z = playerPos.z - tankerPos.z
+    }
+    
+    -- Project onto tanker's local axes
+    local forward = rel.x * tankerMat.x.x + rel.y * tankerMat.x.y + rel.z * tankerMat.x.z - refForward
+    local vertical = rel.x * tankerMat.y.x + rel.y * tankerMat.y.y + rel.z * tankerMat.y.z - refVertical
+    local lateral = rel.x * tankerMat.z.x + rel.y * tankerMat.z.y + rel.z * tankerMat.z.z - refLateral
+    
+    return forward, vertical, lateral
+end
+
+-- Function to convert geometric offsets to gauge position strings
+-- Returns position strings based on GAUGE_STEP_METERS intervals per gauge unit
+-- duPos: vertical position (U, U2, C, D2, D, or OFF)
+-- faPos: forward/aft position (F, F2, C, A2, A, or OFF)
+local function offsetsToGaugePosition(forward, vertical, lateral)
+    -- Calculate boundaries based on step size
+    local boundary1 = GAUGE_STEP_METERS * 2   -- e.g., 3m for step=2
+    local boundary2 = GAUGE_STEP_METERS * 1   -- e.g., 1m for step=2
+    local maxRange = GAUGE_STEP_METERS * 10   -- e.g., 5m for step=2
+    
+    -- Return OFF if out of reasonable range
+    if math.abs(forward) > maxRange or math.abs(vertical) > maxRange or math.abs(lateral) > maxRange then
+        return "OFF", "OFF"
+    end
+    
+    -- Convert vertical offset to DU position string
+    -- Negative = too high (U), Positive = too low (D)
+    local duPos
+    if vertical < -boundary1 then
+        duPos = "U"      -- 2*step too high
+    elseif vertical < -boundary2 then
+        duPos = "U2"     -- 1*step too high
+    elseif vertical <= boundary2 then
+        duPos = "C"      -- Centered
+    elseif vertical <= boundary1 then
+        duPos = "D2"     -- 1*step too low
+    else
+        duPos = "D"      -- 2*step too low
+    end
+    
+    -- Convert forward/aft offset to FA position string
+    -- Negative = too close (F), Positive = too far (A)
+    local faPos
+    if forward < -boundary1 then
+        faPos = "F"      -- 2*step too close
+    elseif forward < -boundary2 then
+        faPos = "F2"     -- 1*step too close
+    elseif forward <= boundary2 then
+        faPos = "C"      -- Centered
+    elseif forward <= boundary1 then
+        faPos = "A2"     -- 1*step too far
+    else
+        faPos = "A"      -- 2*step too far
+    end
+    
+    return duPos, faPos
+end
+
+-- Function to find closest KC-135 and calculate geometric PDL position
+function findClosestKC135()
+    log.write('AccMod', log.INFO, "=== findClosestKC135: Starting search ===")
+    
+    -- Get player data
+    local selfData = base.Export.LoGetSelfData()
+    if not selfData or not selfData.LatLongAlt then
+        log.write('AccMod', log.WARNING, "findClosestKC135: No player data available")
+        return nil, nil, nil, nil
+    end
+    
+    log.write('AccMod', log.INFO, string.format("findClosestKC135: Player data OK - Lat:%.4f, Long:%.4f, Alt:%.1f", 
+        selfData.LatLongAlt.Lat, selfData.LatLongAlt.Long, selfData.LatLongAlt.Alt))
+    
+    -- Use aircraft position directly from selfData
+    if not selfData.Position then
+        log.write('AccMod', log.WARNING, "findClosestKC135: No position data in selfData")
+        return nil, nil, nil, nil
+    end
+    
+    local playerPos = selfData.Position
+    log.write('AccMod', log.INFO, string.format("findClosestKC135: Player position X:%.1f, Y:%.1f, Z:%.1f", 
+        playerPos.x, playerPos.y, playerPos.z))
+    
+    local worldObjects = base.Export.LoGetWorldObjects()
+    if not worldObjects then
+        log.write('AccMod', log.WARNING, "findClosestKC135: No world objects available")
+        return nil, nil, nil, nil
+    end
+    
+    -- Count objects
+    local objCount = 0
+    for _ in pairs(worldObjects) do objCount = objCount + 1 end
+    log.write('AccMod', log.INFO, string.format("findClosestKC135: Searching %d world objects", objCount))
+    
+    local closestTanker = nil
+    local tankerUnitName = nil
+    local closestDistance = 25 * 1852
+    local closestTankerData = nil
+    local tankersFound = 0
+    
+    for objID, objData in pairs(worldObjects) do
+        if objData and objData.Type
+            and objData.Type.level1 == 1
+            and objData.Type.level2 == 1
+            and objData.Name
+            and objData.Position
+        then
+            local name = objData.Name:lower()
+            
+            -- Use plain string matching (not pattern matching) - 3rd param=true disables patterns
+            local match1 = name:find("kc-135", 1, true)
+            local match2 = name:find("kc135", 1, true)
+            
+            if match1 or match2 then
+                tankersFound = tankersFound + 1
+                log.write('AccMod', log.INFO, string.format("findClosestKC135: Found KC-135 #%d (ID:%s, Type:%s, UnitName:%s)", 
+                    tankersFound, tostring(objID), objData.Name, objData.UnitName or "N/A"))
+                
+                -- Use Position directly from world object
+                local dx = objData.Position.x - playerPos.x
+                local dz = objData.Position.z - playerPos.z
+                local distance = math.sqrt(dx*dx + dz*dz)
+                local distanceNM = distance / 1852
+                
+                log.write('AccMod', log.INFO, string.format("findClosestKC135: Tanker #%d distance: %.1f nm", 
+                    tankersFound, distanceNM))
+                
+                if distance < closestDistance then
+                    closestDistance = distance
+                    closestTanker = objID
+                    tankerUnitName = objData.UnitName
+                    closestTankerData = objData
+                    log.write('AccMod', log.INFO, string.format("findClosestKC135: New closest tanker (ID:%s, UnitName:%s) at %.1f nm", 
+                        tostring(objID), objData.UnitName or "N/A", distanceNM))
+                end
+            end
+        end
+    end
+    
+    log.write('AccMod', log.INFO, string.format("findClosestKC135: Search complete - found %d KC-135(s) total", tankersFound))
+    
+    -- If we found a tanker, calculate geometric offsets
+    if closestTanker and closestTankerData then
+        local distanceNM = closestDistance / 1852
+        
+        -- Calculate relative position using geometry
+        local forward, vertical, lateral = calculateRelativePosition(
+            playerPos,
+            closestTankerData.Position,
+            closestTankerData.Heading,
+            closestTankerData.Pitch,
+            closestTankerData.Bank
+        )
+        
+        log.write('AccMod', log.INFO, string.format("findClosestKC135: Relative position - Fwd:%.2fm, Vert:%.2fm, Lat:%.2fm",
+            forward, vertical, lateral))
+        
+        log.write('AccMod', log.INFO, string.format("findClosestKC135: RESULT - Closest KC-135 (ID:%s, UnitName:%s) at %.1f nm (GEOMETRIC)", 
+            tostring(closestTanker), tankerUnitName or "unknown", distanceNM))
+        
+        return forward, vertical, lateral, distanceNM, closestTanker, tankerUnitName
+    end
+    
+    log.write('AccMod', log.WARNING, "findClosestKC135: RESULT - No KC-135 found within 25 nm")
+    return nil, nil, nil, nil, nil, nil
+end
+
+-- Helper function to convert draw argument value to gauge position string
+-- drawArgValue: normalized value (typically 0-1 range)
+-- Returns: position string (U, U2, C, D2, D for vertical; F, F2, C, A2, A for horizontal)
+local function drawArgToGaugePosition(drawArgValue, axis)
+    if not drawArgValue then
+        return "OFF"
+    end
+    
+    local value = base.tonumber(drawArgValue)
+    if not value then
+        return "OFF"
+    end
+    if value == 0 then 
+        return "OFF"
+    end
+    -- Assuming draw arguments are normalized 0-1 where 0.5 is centered
+    -- Adjust these thresholds based on actual tanker draw argument behavior
+    if axis == "vertical" then
+        -- DU (Down/Up) positions
+
+
+        if value < 0.2 then
+            return "D"      -- Too high
+        elseif value < 0.4 then
+            return "D2"     -- Slightly high
+        elseif value <= 0.6 then
+            return "C"      -- Centered
+        elseif value <= 0.8 then
+            return "U2"     -- Slightly low
+        else
+            return "U"      -- Too low
+        end
+    else
+        -- FA (Forward/Aft) positions
+        if value < 0.2 then
+            return "F"      -- Too close
+        elseif value < 0.4 then
+            return "F2"     -- Slightly close
+        elseif value <= 0.6 then
+            return "C"      -- Centered
+        elseif value <= 0.8 then
+            return "A2"     -- Slightly far
+        else
+            return "A"      -- Too far
+        end
+    end
+end
+
+-- Function to get tanker gauge positions from a specific tanker ID using geometry
+-- More efficient than searching all objects
+-- Returns: duPos, faPos (position strings for vertical and forward/aft)
+function getTankerGaugePosition(tankerUnitName)
+    if not tankerUnitName then
+        return nil, nil
+    end
+    
+    -- Get player position
+    local selfData = base.Export.LoGetSelfData()
+    if not selfData or not selfData.Position then
+        return nil, nil
+    end
+    
+    local playerPos = selfData.Position
+    
+    -- Get all world objects and find our tanker by unit name
+    local worldObjects = base.Export.LoGetWorldObjects()
+    if not worldObjects then
+        return nil, nil
+    end
+    
+    local tankerData = nil
+    for objID, objData in pairs(worldObjects) do
+        if objData and objData.UnitName == tankerUnitName then
+            tankerData = objData
+            break
+        end
+    end
+    
+    if not tankerData or not tankerData.Position then
+        -- Tanker no longer exists
+        return nil, nil
+    end
+    
+    -- Log detailed position and orientation data for analysis
+    log.write('AccMod', log.INFO, string.format("PLAYER: Pos[X:%.2f Y:%.2f Z:%.2f] Hdg:%.4f Pitch:%.4f Roll:%.4f",
+        playerPos.x, playerPos.y, playerPos.z,
+        selfData.Heading or 0, selfData.Pitch or 0, selfData.Bank or 0))
+    log.write('AccMod', log.INFO, string.format("TANKER: Pos[X:%.2f Y:%.2f Z:%.2f] Hdg:%.4f Pitch:%.4f Roll:%.4f",
+        tankerData.Position.x, tankerData.Position.y, tankerData.Position.z,
+        tankerData.Heading or 0, tankerData.Pitch or 0, tankerData.Bank or 0))
+    
+    -- Calculate relative position
+    local forward, vertical, lateral = calculateRelativePosition(
+        playerPos,
+        tankerData.Position,
+        tankerData.Heading,
+        tankerData.Pitch,
+        tankerData.Bank
+    )
+    
+    -- Convert to gauge positions
+    local duPos, faPos = offsetsToGaugePosition(forward, vertical, lateral)
+    
+    return duPos, faPos, forward, vertical, lateral
+end
+
+-- Function to get tanker gauge positions using draw arguments from mission environment
+-- Same signature as getTankerGaugePosition but uses mission API instead of geometry
+-- Returns: duPos, faPos (position strings for vertical and forward/aft)
+function getTankerGaugePositionFromDrawArgs(tankerUnitName)
+    if not tankerUnitName then
+        return nil, nil
+    end
+    
+    -- Get AccModBridge - try module scope first, then global
+    local bridge = AccModBridge or base.AccModBridge or base._G.AccModBridge
+    
+    if not bridge then
+        log.write('AccMod', log.WARNING, "getTankerGaugePositionFromDrawArgs: AccModBridge not available")
+        return nil, nil
+    end
+    
+    -- Get draw arguments from mission environment
+    local arg1, arg2, errorMsg = getTankerDrawArguments(bridge, tankerUnitName)
+    
+    if errorMsg then
+        log.write('AccMod', log.WARNING, "getTankerGaugePositionFromDrawArgs: " .. errorMsg)
+        return nil, nil
+    end
+    
+    -- Convert draw arguments to gauge positions
+    local duPos = drawArgToGaugePosition(arg1, "vertical")
+    local faPos = drawArgToGaugePosition(arg2, "horizontal")
+    
+    log.write('AccMod', log.INFO, string.format("getTankerGaugePositionFromDrawArgs: Draw args [%s, %s] -> Gauge [%s, %s]",
+        tostring(arg1), tostring(arg2), duPos, faPos))
+    
+    return duPos, faPos
+end
+
+-- Function to convert gauge positions to PDL filename
+-- duPos: position string (U, U2, C, D2, D, OFF) for vertical
+-- faPos: position string (F, F2, C, A2, A, OFF) for forward/aft
+-- Format: pdl_DU[position]_FA[position].jpg
+-- Examples:
+--   pdl_DUD_FAF.jpg — D/U at Down, F/A at Forward
+--   pdl_DUOFF_FAOFF.jpg — both strips off
+--   pdl_DUC_FAA.jpg — D/U at Centre, F/A at Aft
+function positionsToPDLFilename(duPos, faPos)
+    if not duPos or not faPos then
+        return "pdl_DUOFF_FAOFF.jpg"
+    end
+    
+    local filename = string.format("pdl_DU%s_FA%s.jpg", duPos, faPos)
+    log.write('AccMod', log.INFO, string.format("PDL filename: %s (duPos=%s, faPos=%s)", 
+        filename, duPos, faPos))
+    
+    return filename
+end
+
+local AccOverlay = {
+>>>>>>> Stashed changes
 }
 
 function serializeTable(val, name, skipnewlines, depth)
@@ -821,6 +1409,53 @@ function AccModOverlayManager:createManagerWindow()
         end
     end)
 
+<<<<<<< Updated upstream
+=======
+    -- Show Image button
+    local btnShowImage = Button.new("Show PDL")
+    box:insertWidget(btnShowImage)
+    btnShowImage:setBounds(10, 105, 140, 28)
+    btnShowImage:addChangeCallback(function()
+        -- Close existing PDL panel if any
+        if managerInstance.pdlImagePanel and managerInstance.pdlImagePanel.window then
+            managerInstance.pdlImagePanel:closeWindow()
+            managerInstance.pdlImagePanel = nil
+            log.write('AccMod', log.INFO, "Closed PDL panel")
+            return
+        end
+        
+        -- Find closest KC-135 and get its offsets
+        local forward, vertical, lateral, distance, tankerID, tankerUnitName = findClosestKC135()
+        
+       fullPath = "Mods\\Services\\DCS-AccWidg\\Theme\\pdl_DUOFF_FAOFF.jpg"
+        if forward and vertical and lateral and tankerUnitName then
+            --log.write('AccMod', log.INFO, string.format("Showing PDL image: %s (tanker: %s at %.1f nm)", filename, tankerUnitName, distance))
+        else
+            log.write('AccMod', log.WARNING, "No KC-135 found within 25 nm")
+            tankerUnitName = nil
+        end
+        
+        -- Create and show image panel
+        local imagePanel = ImagePanel.new(fullPath)
+        imagePanel:createWindow()
+        
+        -- Store the tanker unit name for efficient tracking
+        imagePanel.tankerUnitName = tankerUnitName    
+        
+        -- Initialize search timer
+        if not tankerUnitName then
+            -- No tanker found, start the 60-second re-search timer
+            imagePanel.lastSearchTime = os.clock()
+            log.write('AccMod', log.INFO, "PDL panel created - no tanker found, will re-search every 60 seconds")
+        else
+            log.write('AccMod', log.INFO, "PDL panel created and monitoring started")
+        end
+        
+        -- Store reference for continuous monitoring
+        managerInstance.pdlImagePanel = imagePanel
+    end)
+
+>>>>>>> Stashed changes
     -- Register hotkey on manager window so it works even when panels are hidden
     self.managerWindow:addHotKeyCallback("Ctrl+Shift+1", AccModOverlayManager.onHotKey)
     net.log("AccMod: Manager window created, hotkey Ctrl+Shift+1 registered, globalMode: " .. tostring(self.globalMode))
@@ -840,14 +1475,92 @@ function AccModOverlayManager:refreshOverlayList()
     end
 end
 
+-- Function to get tanker draw arguments via mission environment injection
+-- Returns: arg1, arg2, errorMessage (if error, arg1 and arg2 are nil)
+function getTankerDrawArguments(bridge,tanker)
+    if not bridge then
+        return nil, nil, "AccModBridge not available"
+    end
+    if not tanker then tanker = 'KC-135' end
+    log.write('AccMod', log.INFO, "getTankerDrawArguments: Executing mission code...")
+    
+    -- Build code to execute in mission environment
+    -- Use a_do_script format for mission environment execution
+    local innerCode = string.format([[
+local tankerName = '%s'
+local result = {}
 
+-- Check if Unit table exists
+if not Unit then
+    result = nil
+    log.write('ACCMOD-MISSION', log.ERROR, "ERROR: Unit API not available in mission environment")
+end
 
+if result then
+    -- Get unit directly by name
+    local foundUnit = Unit.getByName(tankerName)
+    
+    if not foundUnit then
+        result = nil
+        log.write('ACCMOD-MISSION', log.ERROR, "Unit not found by name: " .. tankerName)
+    elseif not foundUnit:isExist() then
+        result = nil
+        log.write('ACCMOD-MISSION', log.ERROR, "Unit exists but not active: " .. tankerName)
+    else
+        -- Check if unit has getDrawArgumentValue
+        if not foundUnit.getDrawArgumentValue then
+            result = nil
+            log.write('ACCMOD-MISSION', log.ERROR, "Unit found but getDrawArgumentValue not available. Unit: " .. foundUnit:getName())
+        else
+            -- Try to get draw arguments
+            local args = {73, 74.75}
 
+            for _, argNum in ipairs(args) do
+                local value = foundUnit:getDrawArgumentValue(argNum)
+                if value then
+                    result[#result + 1] = value
+                end
+            end
 
+            if #result == 0 then
+                result = nil
+                log.write('ACCMOD-MISSION', log.ERROR, "Found unit: " .. foundUnit:getName() .. " but no non-zero draw arguments in range checked")
+            end
+        end
+    end
+end
 
-
-
-
+if result then
+    return "SUCCESS:" .. tostring(result[1]) .. "," .. tostring(result[2]), 1
+else
+    return nil, 1
+end
+]], tanker)
+    
+    -- this is for do_script funkiness makes no fucking sense what is going o nhere
+    local missionCode = "local a,b= a_do_script([=[" .. innerCode .. "]=]) \n return b"
+    
+    log.write('AccMod', log.INFO, "Executing mission code to get draw arguments")
+    
+    local result, success = bridge.execInEnv("mission", missionCode)
+    
+    if not success then
+        return nil, nil, "Bridge execution failed"
+    end
+    
+    if result == nil or result == "" then
+        log.write('AccMod', log.ERROR, "No draw arguments returned from mission environment (result is nil or empty)")
+        return nil, nil, "No draw arguments retrieved from mission\n\nCheck DCS.log for 'ACCMOD-MISSION' errors.\n\nPossible causes:\n- No KC-135 in mission\n- Tanker out of range\n- Unit API not available\n- getDrawArgumentValue not available for AI units"
+    elseif type(result) == "string" and result:match("^SUCCESS:") then
+        local values = result:sub(9)  -- Remove "SUCCESS:" prefix
+        local arg1, arg2 = values:match("([^,]+),([^,]+)")
+        log.write('AccMod', log.INFO, "Draw arguments retrieved: " .. tostring(result))
+        return arg1, arg2, nil
+    else
+        log.write('AccMod', log.ERROR, "Failed to get draw arguments - unexpected format: " .. tostring(result))
+        return nil, nil, "Unexpected result format\n" .. tostring(result)
+    end
+end
 
 function AccModOverlayManager:createPanel(funcName, format, transform, filename)
     local newWindow = AccOverlay.new(
@@ -916,6 +1629,11 @@ function AccModOverlayManager.onHotKey()
 		-- Apply global mode to all panels
 		for _i,_s in pairs(AccModOverlayManager.windows) do
 			_s:setMode(AccModOverlayManager.globalMode)
+		end
+
+		-- Apply mode to PDL image panel if it exists
+		if AccModOverlayManager.pdlImagePanel and AccModOverlayManager.pdlImagePanel.window then
+			AccModOverlayManager.pdlImagePanel:setMode(AccModOverlayManager.globalMode)
 		end
 
         -- show manager window only when global mode is full
