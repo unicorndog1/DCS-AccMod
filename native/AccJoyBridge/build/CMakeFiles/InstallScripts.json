@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/HELL/CODE/DCS-AccMod/native/AccJoyBridge/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

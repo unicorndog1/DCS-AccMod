@@ -1,0 +1,10 @@
+^C:\HELL\CODE\DCS-ACCMOD\OPENXR-LAYER\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/HELL/CODE/DCS-AccMod/OpenXR-Layer -BC:/HELL/CODE/DCS-AccMod/OpenXR-Layer/build --check-stamp-file C:/HELL/CODE/DCS-AccMod/OpenXR-Layer/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

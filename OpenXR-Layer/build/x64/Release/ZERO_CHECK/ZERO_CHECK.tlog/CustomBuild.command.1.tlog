@@ -1,0 +1,10 @@
+^C:\HELL\CODE\DCS-ACCMOD\OPENXR-LAYER\BUILD\CMAKEFILES\11279EA7548E68FFEEE3B7854066BB67\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/HELL/CODE/DCS-AccMod/OpenXR-Layer -BC:/HELL/CODE/DCS-AccMod/OpenXR-Layer/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/HELL/CODE/DCS-AccMod/OpenXR-Layer/build/DCS_AccMod_OpenXR_Layer.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

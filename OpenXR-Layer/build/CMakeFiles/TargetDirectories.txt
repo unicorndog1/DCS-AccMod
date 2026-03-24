@@ -1,0 +1,3 @@
+C:/HELL/CODE/DCS-AccMod/OpenXR-Layer/build/CMakeFiles/DCS_AccMod_OpenXR_Layer.dir
+C:/HELL/CODE/DCS-AccMod/OpenXR-Layer/build/CMakeFiles/ALL_BUILD.dir
+C:/HELL/CODE/DCS-AccMod/OpenXR-Layer/build/CMakeFiles/ZERO_CHECK.dir

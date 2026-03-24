@@ -1,0 +1,14 @@
+{
+    "file_format_version": "1.0.0",
+    "api_layer": {
+        "name": "XR_APILAYER_DCS_AccMod",
+        "library_path": ".\\DCS_AccMod_OpenXR_Layer.dll",
+        "api_version": "1.0",
+        "implementation_version": "1",
+        "description": "DCS AccMod OpenXR Overlay Layer - Renders aircraft tracking circles/dots in VR",
+        "functions": {
+            "xr_negotiate_loader_api_layer_interface": "xrNegotiateLoaderApiLayerInterface"
+        },
+        "disable_environment": "DISABLE_DCS_ACCMOD_LAYER"
+    }
+}

@@ -1,0 +1,27 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\HELL\CODE\DCS-AccMod\native\AccJoyBridge\src\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\HELL\CODE\DCS-AccMod\native\AccJoyBridge\src\joystick_monitor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="C:\HELL\CODE\DCS-AccMod\native\AccJoyBridge\src\joystick_monitor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\HELL\CODE\DCS-AccMod\native\AccJoyBridge\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{17FE2C4C-FF01-3B33-88CC-96F53FF99C8D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{681570ED-14C9-30E4-B310-A07CF8493078}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

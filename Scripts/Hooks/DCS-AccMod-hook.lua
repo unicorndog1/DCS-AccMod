@@ -27,17 +27,21 @@ net.log("AccModBridge ready - net.dostring_in accessible via AccModBridge.execIn
 -- Make AccModBridge globally accessible
 _G.AccModBridge = AccModBridge
 
--- Load the main AccMod script
-status, result = pcall(function() 
+function bootstrap(me) 
+  package.loaded.AccMod = nil  -- Clear any existing AccMod module
+
     local dcsSr = require('lfs')
     dofile(dcsSr.writedir()..[[Mods\Services\DCS-AccWidg\Scripts\DCS-SRS-AccMod.lua]])
     
     -- Inject AccModBridge directly into the AccMod module if it exists
     if package.loaded.AccMod then
         package.loaded.AccMod.AccModBridge = AccModBridge
+        package.loaded.AccMod.bootstrap = me
         net.log("AccModBridge injected into AccMod module")
     end
-end, nil) 
+end
+-- Load the main AccMod script
+status, result = pcall(bootstrap, bootstrap) 
 
 if not status then
     net.log("AccMod Load Error: " .. tostring(result))

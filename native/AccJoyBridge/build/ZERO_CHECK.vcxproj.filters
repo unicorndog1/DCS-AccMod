@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\HELL\CODE\DCS-AccMod\native\AccJoyBridge\build\CMakeFiles\7c9923dc97768178ae2b831e5cd92d7e\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{7DC439D3-5512-3CD0-977F-B9DC9E0F8FAB}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

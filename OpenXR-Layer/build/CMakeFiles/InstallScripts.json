@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/HELL/CODE/DCS-AccMod/OpenXR-Layer/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
