@@ -148,11 +148,36 @@ static int lua_isRunning(lua_State* L) {
     return 1;
 }
 
+// Lua function: listDevices()
+// Returns a tab-separated list of devices: index<TAB>guid<TAB>instanceName<TAB>productName\n
+static int lua_listDevices(lua_State* L) {
+    if (!LoadLuaAPI()) {
+        return 0;
+    }
+
+    std::vector<JoystickMonitor::DeviceInfo> devices = JoystickMonitor::EnumerateAttachedDevices();
+    std::string payload;
+    for (const auto& dev : devices) {
+        payload += std::to_string(dev.index);
+        payload += "\t";
+        payload += dev.guid;
+        payload += "\t";
+        payload += dev.instanceName;
+        payload += "\t";
+        payload += dev.productName;
+        payload += "\n";
+    }
+
+    g_lua_pushstring(L, payload.c_str());
+    return 1;
+}
+
 // Lua module registration
 static const luaL_Reg joybridge_funcs[] = {
     {"start", lua_start},
     {"stop", lua_stop},
     {"isRunning", lua_isRunning},
+    {"listDevices", lua_listDevices},
     {nullptr, nullptr}
 };
 

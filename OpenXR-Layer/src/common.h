@@ -48,9 +48,11 @@ struct CircleData {
     float r, g, b, a;  // Color RGBA (0.0 to 1.0)
     bool filled;       // true = filled circle, false = hollow ring
     float thickness;   // Ring thickness (normalized, same scale as radius)
+    float labelR, labelG, labelB, labelA;  // Text color RGBA (0.0 to 1.0)
     char label[64];    // Text label to display above circle (unit type)
     
-    CircleData() : x(0), y(0), radius(0), r(0), g(0), b(0), a(0), filled(false), thickness(0) {
+    CircleData() : x(0), y(0), radius(0), r(0), g(0), b(0), a(0), filled(false), thickness(0),
+        labelR(1.0f), labelG(1.0f), labelB(1.0f), labelA(0.95f) {
         label[0] = '\0';
     }
 };

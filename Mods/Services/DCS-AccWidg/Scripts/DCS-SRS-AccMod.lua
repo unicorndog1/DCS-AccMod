@@ -59,6 +59,7 @@ local _lastReceived = 0
 local WIDTH = 420
 local HEIGHT = 260
 local UnitHighlightPanel = {}
+local UnitPlacerPanel = {}
 
 JankyJoy = {}
 local ImagePanel = {}
@@ -128,6 +129,10 @@ ensureJoystickUdpSocket(true)
 
 -- AccJoyBridge DLL loader (C++ replacement for hing.py)
 local AccJoyBridge = nil
+local lastJoyBridgeHealthCheck = 0
+local lastJoyBridgeRestartAttempt = 0
+local JOYBRIDGE_HEALTH_CHECK_INTERVAL = 2.0
+local JOYBRIDGE_RESTART_COOLDOWN = 5.0
 local function loadAccJoyBridge()
     -- Add bin directory to DLL search path
     local binPath = lfs.writedir() .. "Mods\\Services\\DCS-AccWidg\\bin\\?.dll"
@@ -158,18 +163,63 @@ local function initializeAccJoyBridge()
             end
         end
 
-        -- Start monitoring joystick at index 1 (same as hing.py)
-        local okStart, success, err = pcall(AccJoyBridge.start, 1)
+        -- Start monitoring all connected joysticks when supported by the bridge.
+        -- Legacy bridge builds may ignore -1 and fall back to a default device.
+        local okStart, success, err = pcall(AccJoyBridge.start, -1)
         if not okStart then
             success = false
             err = "start() exception"
         end
         if success then
-            log.write('AccMod', log.INFO, "AccJoyBridge: Joystick monitoring started (joystick index 1)")
+            log.write('AccMod', log.INFO, "AccJoyBridge: Joystick monitoring started (all devices)")
         else
             log.write('AccMod', log.ERROR, "AccJoyBridge: Failed to start - " .. tostring(err))
          
         end
+    end
+end
+
+local function ensureAccJoyBridgeRunning()
+    if not AccJoyBridge then
+        return
+    end
+
+    if type(AccJoyBridge.isRunning) ~= "function" or type(AccJoyBridge.start) ~= "function" then
+        return
+    end
+
+    local now = os.clock()
+    if (now - lastJoyBridgeHealthCheck) < JOYBRIDGE_HEALTH_CHECK_INTERVAL then
+        return
+    end
+    lastJoyBridgeHealthCheck = now
+
+    local okRunning, isRunning = pcall(AccJoyBridge.isRunning)
+    if not okRunning then
+        log.write('AccMod', log.WARNING, "AccJoyBridge: isRunning() failed during health check")
+        return
+    end
+
+    if isRunning then
+        return
+    end
+
+    if (now - lastJoyBridgeRestartAttempt) < JOYBRIDGE_RESTART_COOLDOWN then
+        return
+    end
+
+    lastJoyBridgeRestartAttempt = now
+    log.write('AccMod', log.WARNING, "AccJoyBridge: Monitor stopped unexpectedly; attempting restart")
+    local okStart, success, err = pcall(AccJoyBridge.start, -1)
+    if not okStart then
+        success = false
+        err = "start() exception"
+    end
+
+    if success then
+        log.write('AccMod', log.INFO, "AccJoyBridge: Monitor restart succeeded")
+    else
+        log.write('AccMod', log.ERROR, "AccJoyBridge: Monitor restart failed - " .. tostring(err))
     end
 end
 
@@ -257,6 +307,14 @@ local function clearOpenXRLayerOverlay()
     if AccModOverlayManager and AccModOverlayManager.openxrUDP then
         AccModOverlayManager.openxrUDP:sendto("A", "127.0.0.1", 7779)
     end
+end
+
+local function getAccModBridge()
+    return AccModBridge or base.AccModBridge or base._G.AccModBridge
+end
+
+local function wrapMissionScript(innerCode)
+    return "local a,b= a_do_script([=[" .. innerCode .. "]=]) \n return b"
 end
 
 local function getLayerRenderModeName(mode)
@@ -696,11 +754,13 @@ local function getCurrentJoyVrMode()
     return 0
 end
 
-local function setJankyJoyButtonState(buttonId, isPressed)
+local function setJankyJoyButtonState(buttonId, isPressed, deviceGuid)
     JankyJoy.buttonStates = JankyJoy.buttonStates or {}
-    JankyJoy.buttonStates[buttonId] = isPressed
+    local stateKey = (deviceGuid and deviceGuid ~= "*") and (deviceGuid .. ":" .. buttonId) or buttonId
+    JankyJoy.buttonStates[stateKey] = isPressed
     JankyJoy.lastButtonEvent = {
         buttonId = buttonId,
+        deviceGuid = deviceGuid,
         isPressed = isPressed,
         vrMode = getCurrentJoyVrMode(),
     }
@@ -774,6 +834,179 @@ local function cycleLayerRenderMode()
     syncManagerRenderModeUi()
 end
 
+local function performVrModeToggle(managerInstance, vrButton, vrResetButton)
+    if not managerInstance then
+        return
+    end
+
+    if managerInstance.openxrLayerAvailable == nil then
+        managerInstance:checkOpenXRLayerAvailable()
+        if managerInstance.openxrStatusWidget then
+            if managerInstance.openxrLayerAvailable == true then
+                managerInstance.openxrStatusWidget:setText("OpenXR Layer: Available (LAYER mode enabled)")
+            elseif managerInstance.openxrLayerAvailable == false then
+                managerInstance.openxrStatusWidget:setText("OpenXR Layer: Not detected (Window overlay enabled)")
+            else
+                managerInstance.openxrStatusWidget:setText("OpenXR Layer: Unknown status")
+            end
+        end
+    end
+
+    local startMode = managerInstance.vrModeEnabled
+    local attempts = 0
+
+    repeat
+        managerInstance.vrModeEnabled = (managerInstance.vrModeEnabled + 1) % 3
+        attempts = attempts + 1
+
+        if managerInstance.vrModeEnabled == 1 and managerInstance.openxrLayerAvailable == true then
+            managerInstance.vrModeEnabled = (managerInstance.vrModeEnabled + 1) % 3
+        elseif managerInstance.vrModeEnabled == 2 and managerInstance.openxrLayerAvailable == false then
+            managerInstance.vrModeEnabled = (managerInstance.vrModeEnabled + 1) % 3
+        end
+    until managerInstance.vrModeEnabled ~= startMode or attempts > 3
+
+    if managerInstance.openxrUDP then
+        managerInstance.openxrUDP:sendto("A", "127.0.0.1", 7779)
+        log.write('AccMod', log.INFO, "Cleared OpenXR circles on mode switch")
+    end
+
+    if managerInstance.vrModeEnabled == 0 then
+        if vrButton then vrButton:setText("VR Mode: OFF") end
+        if vrResetButton then vrResetButton:setVisible(false) end
+        log.write('AccMod', log.INFO, "VR Mode: OFF")
+    elseif managerInstance.vrModeEnabled == 1 then
+        managerInstance:captureVRReference()
+        if vrResetButton then vrResetButton:setVisible(true) end
+        if vrButton then
+            if managerInstance.openxrLayerAvailable == false then
+                vrButton:setText("VR Mode: ON")
+            else
+                vrButton:setText("VR Mode: ON (overlay)")
+            end
+        end
+        log.write('AccMod', log.INFO, "VR Mode: ON (window overlay)")
+    elseif managerInstance.vrModeEnabled == 2 then
+        managerInstance:captureVRReference()
+        if vrResetButton then vrResetButton:setVisible(false) end
+        if not managerInstance.openxrUDP then
+            managerInstance.openxrUDP = socket.udp()
+            managerInstance.openxrUDP:settimeout(0)
+            log.write('AccMod', log.INFO, "OpenXR UDP socket created")
+        end
+        if vrButton then
+            if managerInstance.openxrLayerAvailable == true then
+                vrButton:setText("VR Mode: LAYER")
+            else
+                vrButton:setText("VR Mode: LAYER (?)")
+            end
+        end
+        log.write('AccMod', log.INFO, "VR Mode: ON LAYER")
+    end
+
+    ensureUnitHighlightPanelForMode()
+    syncManagerRenderModeUi()
+end
+
+local KEYBIND_ACTIONS = {
+    switchLabelMode = "Switch Label Mode",
+    toggleVrMode = "Toggle VR Mode",
+}
+
+local SUPPORTED_KEYBOARD_BINDS = {
+    "NONE",
+    "Ctrl+Shift+1", "Ctrl+Shift+2", "Ctrl+Shift+3", "Ctrl+Shift+4", "Ctrl+Shift+5",
+    "Ctrl+Shift+6", "Ctrl+Shift+7", "Ctrl+Shift+8", "Ctrl+Shift+9",
+    "Ctrl+Alt+1", "Ctrl+Alt+2", "Ctrl+Alt+3", "Ctrl+Alt+4", "Ctrl+Alt+5",
+    "Ctrl+Alt+6", "Ctrl+Alt+7", "Ctrl+Alt+8", "Ctrl+Alt+9",
+}
+
+local DEFAULT_MANAGER_KEYBINDS = {
+    switchLabelMode = {
+        keyboard = "Ctrl+Shift+4",
+        joystick = {
+            deviceGuid = "*",
+            buttonId = 31,
+        },
+    },
+    toggleVrMode = {
+        keyboard = "Ctrl+Shift+5",
+        joystick = {
+            deviceGuid = "*",
+            buttonId = -1,
+        },
+    },
+}
+
+local function cloneDefaultKeybinds()
+    return {
+        switchLabelMode = {
+            keyboard = DEFAULT_MANAGER_KEYBINDS.switchLabelMode.keyboard,
+            joystick = {
+                deviceGuid = DEFAULT_MANAGER_KEYBINDS.switchLabelMode.joystick.deviceGuid,
+                buttonId = DEFAULT_MANAGER_KEYBINDS.switchLabelMode.joystick.buttonId,
+            },
+        },
+        toggleVrMode = {
+            keyboard = DEFAULT_MANAGER_KEYBINDS.toggleVrMode.keyboard,
+            joystick = {
+                deviceGuid = DEFAULT_MANAGER_KEYBINDS.toggleVrMode.joystick.deviceGuid,
+                buttonId = DEFAULT_MANAGER_KEYBINDS.toggleVrMode.joystick.buttonId,
+            },
+        },
+    }
+end
+
+local function normalizeKeybindConfig(raw)
+    local normalized = cloneDefaultKeybinds()
+    if type(raw) ~= "table" then
+        return normalized
+    end
+
+    for actionName, _ in pairs(KEYBIND_ACTIONS) do
+        local src = raw[actionName]
+        if type(src) == "table" then
+            if type(src.keyboard) == "string" and src.keyboard ~= "" then
+                normalized[actionName].keyboard = src.keyboard
+            end
+
+            if type(src.joystick) == "table" then
+                if type(src.joystick.deviceGuid) == "string" and src.joystick.deviceGuid ~= "" then
+                    normalized[actionName].joystick.deviceGuid = src.joystick.deviceGuid
+                end
+                local btnId = tonumber(src.joystick.buttonId)
+                if btnId ~= nil then
+                    normalized[actionName].joystick.buttonId = math.floor(btnId)
+                end
+            end
+        end
+    end
+
+    return normalized
+end
+
+local function isKeyboardBindingMatch(bindingValue, combo)
+    if type(bindingValue) ~= "string" or bindingValue == "" or bindingValue == "NONE" then
+        return false
+    end
+    return bindingValue == combo
+end
+
+local function isJoystickBindingMatch(binding, deviceGuid, buttonId)
+    if type(binding) ~= "table" then
+        return false
+    end
+    local joy = binding.joystick
+    if type(joy) ~= "table" then
+        return false
+    end
+    if tonumber(joy.buttonId) ~= tonumber(buttonId) then
+        return false
+    end
+    local boundGuid = tostring(joy.deviceGuid or "*")
+    return boundGuid == "*" or boundGuid == tostring(deviceGuid or "")
+end
+
 local JOY_BUTTON_EVENT_HANDLERS = {
     BTN_21 = {
         PRESSED = {
@@ -799,13 +1032,6 @@ local JOY_BUTTON_EVENT_HANDLERS = {
             [2] = endLayerSuppressedZoom,
         },
     },
-    BTN_31 = {
-        PRESSED = {
-            [0] = cycleWindowRenderMode,
-            [1] = cycleWindowRenderMode,
-            [2] = cycleLayerRenderMode,
-        },
-    },
 }
 
 local function fireJoyButtonEvent(buttonId, eventState, msg)
@@ -821,8 +1047,72 @@ local function fireJoyButtonEvent(buttonId, eventState, msg)
 
     local handler = stateHandlers[getCurrentJoyVrMode()] or stateHandlers.default
     if handler then
-        handler(msg, buttonId)
+        handler(msg)
     end
+end
+
+local function dispatchKeybindAction(actionName, triggerState)
+    if actionName == "switchLabelMode" then
+        if triggerState == "PRESSED" then
+            if getCurrentJoyVrMode() == 2 then
+                cycleLayerRenderMode()
+            else
+                cycleWindowRenderMode()
+            end
+            return true
+        end
+        return false
+    end
+
+    if actionName == "toggleVrMode" then
+        if triggerState == "PRESSED" then
+            performVrModeToggle(
+                AccModOverlayManager,
+                AccModOverlayManager and AccModOverlayManager.vrButtonWidget,
+                AccModOverlayManager and AccModOverlayManager.vrResetButtonWidget
+            )
+            return true
+        end
+        return false
+    end
+
+    return false
+end
+
+local function dispatchKeyboardBinding(combo)
+    local manager = AccModOverlayManager
+    if not manager or not manager.managerConfig or not manager.managerConfig.keybinds then
+        return false
+    end
+
+    for actionName, _ in pairs(KEYBIND_ACTIONS) do
+        local binding = manager.managerConfig.keybinds[actionName]
+        if isKeyboardBindingMatch(binding and binding.keyboard, combo) then
+            if dispatchKeybindAction(actionName, "PRESSED") then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function dispatchJoystickBinding(deviceGuid, buttonId, eventState)
+    local manager = AccModOverlayManager
+    if not manager or not manager.managerConfig or not manager.managerConfig.keybinds then
+        return false
+    end
+
+    for actionName, _ in pairs(KEYBIND_ACTIONS) do
+        local binding = manager.managerConfig.keybinds[actionName]
+        if isJoystickBindingMatch(binding, deviceGuid, buttonId) then
+            if dispatchKeybindAction(actionName, eventState) then
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
 -- VR camera delta rotation matrix (rotation from aircraft to camera orientation)
@@ -1197,6 +1487,8 @@ function UnitHighlightPanel.new()
     o.windowRenderMode = WINDOW_RENDER_MODE_DOTS_ONLY
     o.openxrLayerRenderMode = LAYER_RENDER_MODE_DOTS_LABELS_CLOSEST_RING
     o.lastVisibleState = nil
+    o.dotColorCache = {}  -- Cache for dot skin colors (performance optimization)
+    o.labelColorCache = {}  -- Cache for label skin colors (performance optimization)
     return o
 end
 
@@ -2123,6 +2415,9 @@ function UnitHighlightPanel:detectUnits()
     local onScreenCount = 0
     local losFailedCount = 0
     
+    -- Cache camera position once per frame (performance optimization)
+    local camera = base.Export.LoGetCameraPosition()
+    
     -- Check each unit - find all visible on screen
     for objID, objData in pairs(worldObjects) do
         if objData and objData.Position and objData.Type then
@@ -2160,8 +2455,7 @@ function UnitHighlightPanel:detectUnits()
                             local dz = objData.Position.z - selfData.Position.z
                             local distance = math.sqrt(dx*dx + dy*dy + dz*dz)
                             
-                            -- Check if unit is within forward-facing cone
-                            local camera = base.Export.LoGetCameraPosition()
+                            -- Check if unit is within forward-facing cone (use cached camera)
                             local facingDot = self:getForwardFacingDot(objData.Position, camera)
                             
                             -- Skip units beyond 10km (10000 meters)
@@ -2256,10 +2550,13 @@ function UnitHighlightPanel:renderWindowOverlay(detectedUnits, selfData)
             local dotY = unit.screenY - dotDisplaySize / 2
             dot:setBounds(dotX, dotY, dotDisplaySize+10, dotDisplaySize+10)
             
-            -- Update dot color based on coalition
-            local dotSkin = dot:getSkin()
-            dotSkin.skinData.states.released[1].text.color = dotColor
-            dot:setSkin(dotSkin)
+            -- Update dot color based on coalition (only if changed - performance optimization)
+            if self.dotColorCache[i] ~= dotColor then
+                local dotSkin = dot:getSkin()
+                dotSkin.skinData.states.released[1].text.color = dotColor
+                dot:setSkin(dotSkin)
+                self.dotColorCache[i] = dotColor
+            end
             
             -- Use PNG ring images with distance-based visibility
             -- Choose blue or red ring based on coalition
@@ -2294,11 +2591,14 @@ function UnitHighlightPanel:renderWindowOverlay(detectedUnits, selfData)
                 
                 label:setBounds(labelX, labelY, labelWidth, labelHeight)
                 
-                -- Update label color based on coalition
-                local labelSkin = label:getSkin()
+                -- Update label color based on coalition (only if changed - performance optimization)
                 local labelColor = isAllied and "0x0000ffff" or "0xff0000ff"  -- Blue for allied, red for enemy
-                labelSkin.skinData.states.released[1].text.color = labelColor
-                label:setSkin(labelSkin)
+                if self.labelColorCache[i] ~= labelColor then
+                    local labelSkin = label:getSkin()
+                    labelSkin.skinData.states.released[1].text.color = labelColor
+                    label:setSkin(labelSkin)
+                    self.labelColorCache[i] = labelColor
+                end
                 label:setVisible(true)
             elseif self.unitLabels[i] then
                 self.unitLabels[i]:setVisible(false)
@@ -2379,8 +2679,10 @@ function UnitHighlightPanel:renderOpenXRLayer(detectedUnits, selfData)
     AccModOverlayManager.openxrUDP:sendto(
         string.format("V,%.4f,%.4f,%d,%.4f", tanHalfFov, aspect, eyeVis, distance), "127.0.0.1", 7779)
 
-    -- Clear all circles first
-    clearOpenXRLayerOverlay()
+    -- Clear all circles first (only if we had units before)
+    if #detectedUnits > 0 then
+        clearOpenXRLayerOverlay()
+    end
     
     -- Find the unit closest to camera gaze (highest facingDot value)
     local closestUnitIndex = nil
@@ -2399,6 +2701,19 @@ function UnitHighlightPanel:renderOpenXRLayer(detectedUnits, selfData)
         if highestFacingDot < CLOSEST_RING_MIN_DOT then
             closestUnitIndex = nil
         end
+    end
+    
+    -- Batch circles for efficient UDP sending
+    local circleBatch = {}
+    local BATCH_SIZE = 10
+    
+    local function sendBatch(batch)
+        if #batch == 0 then return end
+        
+        -- Format: "B,count,circle1;circle2;circle3;..."
+        local batchData = table.concat(batch, ";")
+        local packet = string.format("B,%d,%s", #batch, batchData)
+        AccModOverlayManager.openxrUDP:sendto(packet, "127.0.0.1", 7779)
     end
     
     -- Send each detected unit
@@ -2454,19 +2769,29 @@ function UnitHighlightPanel:renderOpenXRLayer(detectedUnits, selfData)
         if showLabelsInLayer then
             unitType = unit.data.Name or "Unknown"
         end
+
+        local labelR = r
+        local labelG = g
+        local labelB = b
+        local labelA = 0.95
      
-        -- Send UDP packet: "C,x,y,radius,r,g,b,a,filled,thickness,label"
-        local packet = string.format("C,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%d,%.4f,%s",
-            normX, normY, normRadius, r, g, b, a, filledFlag, normThickness, unitType)
+        -- Build circle data string (without packet prefix)
+        local circleData = string.format("%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%d,%.4f,%.2f,%.2f,%.2f,%.2f,%s",
+            normX, normY, normRadius, r, g, b, a, filledFlag, normThickness,
+            labelR, labelG, labelB, labelA, unitType)
         
-        AccModOverlayManager.openxrUDP:sendto(packet, "127.0.0.1", 7779)
+        -- Add to batch
+        table.insert(circleBatch, circleData)
         
-        -- Log first circle for debugging (only occasionally to avoid spam)
-        if i == 1 and (not self.lastUDPLog or (os.clock() - self.lastUDPLog) >= 2) then
-            --   log.write('AccMod', log.INFO, string.format("Sent to OpenXR: %s", packet))
-            self.lastUDPLog = os.clock()
+        -- Send batch when full
+        if #circleBatch >= BATCH_SIZE then
+            sendBatch(circleBatch)
+            circleBatch = {}
         end
     end
+    
+    -- Send remaining circles
+    sendBatch(circleBatch)
     
     -- Hide all window overlay elements in LAYER mode
     self:hideAllUnitMarkers()
@@ -2563,6 +2888,3093 @@ function UnitHighlightPanel:setMode(mode)
             )
         )
         self.lastVisibleState = shouldShow
+    end
+end
+
+UnitPlacerPanel.__index = UnitPlacerPanel
+
+UnitPlacerPanel.DEFAULT_MAX_DISTANCE_METERS = 5000
+UnitPlacerPanel.DEFAULT_PRESET_NAME = "Soldier M4"
+UnitPlacerPanel.PRESET_ORDER = {
+    "Soldier M4",
+    "M4_Sherman",
+}
+UnitPlacerPanel.PRESETS = {
+    ["Soldier M4"] = {
+        displayName = "Soldier M4",
+        kind = "group",
+        groupCategory = "GROUND",
+        typeName = "Soldier M4",
+        categoryName = "Infantry",
+        subCategoryName = "Infantry",
+        countryNames = { "USA", "RUSSIA" },
+    },
+    ["M4_Sherman"] = {
+        displayName = "M4 Sherman",
+        kind = "group",
+        groupCategory = "GROUND",
+        typeName = "M4_Sherman",
+        categoryName = "Armor",
+        subCategoryName = "Tank",
+        countryNames = { "USA", "RUSSIA" },
+    },
+}
+UnitPlacerPanel.SIDE_OPTIONS = {
+    blue = {
+        label = "Blue / USA",
+        countryName = "USA",
+        fallbackCountryId = 2,
+    },
+    red = {
+        label = "Red / Russia",
+        countryName = "RUSSIA",
+        fallbackCountryId = 0,
+    }, 
+}
+
+function UnitPlacerPanel.getDefaultConfig()
+    return {
+        selectedPreset = UnitPlacerPanel.DEFAULT_PRESET_NAME,
+        coalitionSide = "blue",
+        maxDistance = 500,--UnitPlacerPanel.DEFAULT_MAX_DISTANCE_METERS,
+        headingMode = "face_player",
+        lastStatus = "Idle",
+        selectedCountry = "USA",
+        selectedCategory = nil,
+        selectedSubCategory = nil,
+    }
+end
+
+function UnitPlacerPanel.normalizeConfig(config)
+    local normalized = config or {}
+
+    if normalized.selectedPreset == nil or normalized.selectedPreset == "" then
+        normalized.selectedPreset = UnitPlacerPanel.DEFAULT_PRESET_NAME
+    end
+    if normalized.coalitionSide == nil or not UnitPlacerPanel.SIDE_OPTIONS[normalized.coalitionSide] then
+        normalized.coalitionSide = "blue"
+    end
+    if normalized.maxDistance == nil then
+        normalized.maxDistance = UnitPlacerPanel.DEFAULT_MAX_DISTANCE_METERS
+    end
+    if normalized.headingMode == nil then
+        normalized.headingMode = "face_player"
+    end
+    if normalized.lastStatus == nil then
+        normalized.lastStatus = "Idle"
+    end
+    if normalized.selectedCountry == nil then
+        normalized.selectedCountry = UnitPlacerPanel.SIDE_OPTIONS[normalized.coalitionSide].countryName
+    end
+
+    return normalized
+end
+
+function UnitPlacerPanel.new(manager)
+    local o = {}
+    setmetatable(o, UnitPlacerPanel)
+    o.manager = manager
+    o.window = nil
+    o.panel = nil
+    o.infoText = nil
+    o.clickMarker = nil
+    o.hoverMarker = nil
+    o.selectedMarker = nil
+    o.windowWidth = 0
+    o.windowHeight = 0
+    o.armed = false
+    o.hasBeenArmedOnce = false
+    o.lastMarkerTime = 0
+    o.markerDuration = 1.0
+    o.markerVisible = false
+    o.lastStatusText = ""
+    o.config = UnitPlacerPanel.getDefaultConfig()
+    o.pickerCatalog = nil
+    o.managerTab = nil
+    o.countryCombo = nil
+    o.categoryCombo = nil
+    o.subCategoryCombo = nil
+    o.typeCombo = nil
+    o.catalogEntriesById = {}
+    o.typeEntriesByKey = {}
+    o.typeCatalog = nil
+    -- Drag-and-move state
+    o.draggingUnit = nil
+    o.dragStartX = 0
+    o.dragStartY = 0
+    o.dragLastScreenX = 0
+    o.dragLastScreenY = 0
+    o.dragStartWorldPos = nil
+    o.dragPendingHitPosition = nil
+    o.dragMarker = nil
+    o.dragCurrentHeading = 0
+    o.dragOriginalHeading = 0
+    o.lastDragUpdateTime = 0
+    -- Selected unit & heading dial state
+    o.selectedUnit = nil        -- { name, groupName, x, y, z, heading }
+    o.headingDialPanel = nil
+    o.headingDialNeedle = nil
+    o.headingDialLabel = nil
+    o.headingDialHalfSize = 40
+    o.headingDialRadius = 30
+    o.addedUnitsRegistry = {}
+    return o
+end
+
+function UnitPlacerPanel:applyConfig(config)
+    self.config = UnitPlacerPanel.normalizeConfig(config or self.config)
+    self.lastStatusText = self.config.lastStatus or ""
+
+    if self.infoText then
+        self.infoText:setText(self.lastStatusText)
+    end
+
+    self:syncManagerUi()
+end
+
+function UnitPlacerPanel:exportConfigState()
+    local config = UnitPlacerPanel.normalizeConfig(self.config or UnitPlacerPanel.getDefaultConfig())
+
+    return {
+        selectedPreset = config.selectedPreset,
+        coalitionSide = config.coalitionSide,
+        maxDistance = config.maxDistance,
+        headingMode = config.headingMode,
+        lastStatus = config.lastStatus,
+        selectedCountry = config.selectedCountry,
+        selectedCategory = config.selectedCategory,
+        selectedSubCategory = config.selectedSubCategory,
+    }
+end
+
+function UnitPlacerPanel:_buildAddedUnitKey(groupName, unitName)
+    return tostring(groupName or "") .. "::" .. tostring(unitName or "")
+end
+
+function UnitPlacerPanel:getAddedUnitsCount()
+    local count = 0
+    for _ in pairs(self.addedUnitsRegistry or {}) do
+        count = count + 1
+    end
+    return count
+end
+
+function UnitPlacerPanel:registerAddedUnitFromSpawn(spawnInfo, hitPosition, preset, countryName)
+    if type(spawnInfo) ~= "table" or not spawnInfo.unitName or not spawnInfo.groupName then
+        return nil
+    end
+
+    self.addedUnitsRegistry = self.addedUnitsRegistry or {}
+
+    local key = self:_buildAddedUnitKey(spawnInfo.groupName, spawnInfo.unitName)
+    local existing = self.addedUnitsRegistry[key]
+    local nowIso = os.date("!%Y-%m-%dT%H:%M:%SZ")
+
+    local record = existing or {
+        recordId = key,
+        source = "picker",
+        kind = "group",
+        createdAt = nowIso,
+    }
+
+    record.groupName = spawnInfo.groupName
+    record.unitName = spawnInfo.unitName
+    record.typeName = spawnInfo.typeName or ((preset and preset.typeName) or "")
+    record.groupCategory = (preset and preset.groupCategory) or "GROUND"
+    record.coalition = spawnInfo.coalition or record.coalition or 1
+    record.countryName = countryName or record.countryName or ((preset and preset.countryName) or "")
+    record.countryId = spawnInfo.countryId or record.countryId
+    record.categoryName = preset and preset.categoryName or record.categoryName
+    record.subCategoryName = preset and preset.subCategoryName or record.subCategoryName
+    record.presetName = preset and (preset.displayName or preset.entryId) or record.presetName
+    record.x = hitPosition and hitPosition.x or record.x
+    record.y = hitPosition and hitPosition.y or record.y
+    record.z = hitPosition and hitPosition.z or record.z
+    record.heading = spawnInfo.heading or record.heading or 0
+    record.updatedAt = nowIso
+
+    self.addedUnitsRegistry[key] = record
+    return record
+end
+
+function UnitPlacerPanel:updateTrackedUnitFinalState(unit, newPosition, newHeading)
+    if not unit then
+        return false
+    end
+
+    local key = self:_buildAddedUnitKey(unit.groupName, unit.name)
+    local record = self.addedUnitsRegistry and self.addedUnitsRegistry[key]
+    if not record then
+        return false
+    end
+
+    if newPosition then
+        if newPosition.x ~= nil then record.x = newPosition.x end
+        if newPosition.y ~= nil then record.y = newPosition.y end
+        if newPosition.z ~= nil then record.z = newPosition.z end
+    end
+
+    if type(newHeading) == "number" then
+        record.heading = newHeading
+    end
+
+    if unit.typeName and unit.typeName ~= "" then
+        record.typeName = unit.typeName
+    end
+
+    if unit.coalition ~= nil then
+        record.coalition = unit.coalition
+    end
+
+    record.updatedAt = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    return true
+end
+
+function UnitPlacerPanel:removeTrackedUnit(groupName, unitName)
+    local key = self:_buildAddedUnitKey(groupName, unitName)
+    if self.addedUnitsRegistry and self.addedUnitsRegistry[key] then
+        self.addedUnitsRegistry[key] = nil
+        return true
+    end
+
+    return false
+end
+
+function UnitPlacerPanel:exportAddedUnitsSnapshot()
+    local records = {}
+    for _, record in pairs(self.addedUnitsRegistry or {}) do
+        local copy = {}
+        for k, v in pairs(record) do
+            copy[k] = v
+        end
+        table.insert(records, copy)
+    end
+
+    table.sort(records, function(a, b)
+        if tostring(a.groupName or "") == tostring(b.groupName or "") then
+            return tostring(a.unitName or "") < tostring(b.unitName or "")
+        end
+        return tostring(a.groupName or "") < tostring(b.groupName or "")
+    end)
+
+    return records
+end
+
+function UnitPlacerPanel:loadAddedUnitsSnapshot(records)
+    self.addedUnitsRegistry = {}
+    if type(records) ~= "table" then
+        return 0
+    end
+
+    local loaded = 0
+    for _, record in ipairs(records) do
+        if type(record) == "table" and record.groupName and record.unitName then
+            local key = self:_buildAddedUnitKey(record.groupName, record.unitName)
+            local copy = {}
+            for k, v in pairs(record) do
+                copy[k] = v
+            end
+            copy.recordId = copy.recordId or key
+            self.addedUnitsRegistry[key] = copy
+            loaded = loaded + 1
+        end
+    end
+
+    return loaded
+end
+
+function UnitPlacerPanel:getAddedUnitsManifestPath()
+    return lfs.writedir() .. "Config\\AccModUnitPlacerAddedUnits.lua"
+end
+
+function UnitPlacerPanel:exportAddedUnitsManifest(sourceMissionPath, manifestPath)
+    if not U or type(U.saveInFile) ~= "function" then
+        return false, "U.saveInFile unavailable"
+    end
+
+    local missionPath = sourceMissionPath
+    if not missionPath and DCS and type(DCS.getMissionFilename) == "function" then
+        missionPath = DCS.getMissionFilename()
+    end
+
+    local records = self:exportAddedUnitsSnapshot()
+    local outputPath = manifestPath or self:getAddedUnitsManifestPath()
+    local manifest = {
+        schemaVersion = 1,
+        exportedAt = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        sourceMissionPath = missionPath or "",
+        recordCount = #records,
+        records = records,
+    }
+
+    local ok, err = pcall(function()
+        U.saveInFile(manifest, 'manifest', outputPath)
+    end)
+
+    if not ok then
+        return false, tostring(err)
+    end
+
+    return true, outputPath, #records
+end
+
+function UnitPlacerPanel:getPresetByName(presetName)
+    return UnitPlacerPanel.PRESETS[presetName] or UnitPlacerPanel.PRESETS[UnitPlacerPanel.DEFAULT_PRESET_NAME]
+end
+
+function UnitPlacerPanel:getCatalogEntryById(entryId)
+    return self.catalogEntriesById and self.catalogEntriesById[entryId] or nil
+end
+
+function UnitPlacerPanel:getCurrentCatalogEntry()
+    self.config = UnitPlacerPanel.normalizeConfig(self.config)
+    local typeCatalog = self:buildTypeCatalog()
+    local entry = typeCatalog.entriesByKey[self.config.selectedPreset]
+    if entry then
+        entry.countryName = self.config.selectedCountry
+        return entry
+    end
+
+    local preset = self:getPresetByName(self.config.selectedPreset)
+    return {
+        entryId = self.config.selectedPreset,
+        displayName = preset.displayName,
+        categoryName = preset.categoryName,
+        subCategoryName = preset.subCategoryName,
+        countryName = self.config.selectedCountry,
+        kind = preset.kind,
+        groupCategory = preset.groupCategory,
+        typeName = preset.typeName,
+    }
+end
+
+function UnitPlacerPanel:getCurrentPreset()
+    return self:getCurrentCatalogEntry()
+end
+
+function UnitPlacerPanel:getNextPresetName(currentPresetName)
+    local currentIndex = 1
+
+    for index, presetName in ipairs(UnitPlacerPanel.PRESET_ORDER) do
+        if presetName == currentPresetName then
+            currentIndex = index
+            break
+        end
+    end
+
+    currentIndex = (currentIndex % #UnitPlacerPanel.PRESET_ORDER) + 1
+    return UnitPlacerPanel.PRESET_ORDER[currentIndex]
+end
+
+function UnitPlacerPanel:getSideOption(sideName)
+    return UnitPlacerPanel.SIDE_OPTIONS[sideName] or UnitPlacerPanel.SIDE_OPTIONS.blue
+end
+
+function UnitPlacerPanel:getSideNameForCountry(countryName)
+    local normalizedCountryName = string.upper(tostring(countryName or ""))
+    for sideName, sideData in pairs(UnitPlacerPanel.SIDE_OPTIONS) do
+        if string.upper(tostring(sideData.countryName or "")) == normalizedCountryName then
+            return sideName
+        end
+    end
+
+    return "blue"
+end
+
+function UnitPlacerPanel:getCurrentSide()
+    local config = UnitPlacerPanel.normalizeConfig(self.config)
+    return self:getSideOption(config.coalitionSide)
+end
+
+function UnitPlacerPanel:getArmButtonLabel()
+    return self.armed and "Disarm Placer" or "Arm Placer"
+end
+
+function UnitPlacerPanel:getPresetButtonLabel()
+    return "Preset: " .. tostring(self:getCurrentPreset().displayName)
+end
+
+function UnitPlacerPanel:getSideButtonLabel()
+    return "Side: " .. tostring(self:getCurrentSide().label)
+end
+
+function UnitPlacerPanel:syncManagerUi()
+    local manager = self.manager
+    if not manager then
+        return
+    end
+
+    if manager.unitPlacerArmButtonWidget then
+        manager.unitPlacerArmButtonWidget:setText(self:getArmButtonLabel())
+    end
+
+    if manager.unitPlacerPresetButtonWidget then
+        manager.unitPlacerPresetButtonWidget:setText(self:getPresetButtonLabel())
+    end
+
+    if manager.unitPlacerCoalitionButtonWidget then
+        manager.unitPlacerCoalitionButtonWidget:setText(self:getSideButtonLabel())
+    end
+
+    if manager.unitPlacerStatusWidget then
+        manager.unitPlacerStatusWidget:setText(self.lastStatusText or "")
+    end
+end
+
+function UnitPlacerPanel:setStatusText(text)
+    self.lastStatusText = text or ""
+    self.config = UnitPlacerPanel.normalizeConfig(self.config)
+    self.config.lastStatus = self.lastStatusText
+
+    if self.infoText then
+        self.infoText:setText(self.lastStatusText)
+    end
+
+    self:syncManagerUi()
+end
+
+function UnitPlacerPanel:togglePreset()
+    self:ensurePickerSelection()
+
+    local typeCatalog = self:buildTypeCatalog()
+    local typeEntries = (((typeCatalog.categories[self.config.selectedCategory] or {})[self.config.selectedSubCategory]) or {})
+    if #typeEntries == 0 then
+        return
+    end
+
+    local currentIndex = 1
+    for index, typeEntry in ipairs(typeEntries) do
+        if typeEntry.typeKey == self.config.selectedPreset then
+            currentIndex = index
+            break
+        end
+    end
+
+    currentIndex = (currentIndex % #typeEntries) + 1
+    self.config.selectedPreset = typeEntries[currentIndex].typeKey
+    self:refreshPickerCombos()
+    self:setStatusText("Type selected: " .. tostring(self:getCurrentPreset().displayName))
+end
+
+function UnitPlacerPanel:toggleCoalitionSide()
+    self.config = UnitPlacerPanel.normalizeConfig(self.config)
+    if self.config.coalitionSide == "blue" then
+        self.config.coalitionSide = "red"
+    else
+        self.config.coalitionSide = "blue"
+    end
+
+    self.config.selectedCountry = self:getCurrentSide().countryName
+    self:refreshPickerCombos()
+    self:setStatusText("Spawn side: " .. tostring(self:getCurrentSide().label))
+end
+
+function UnitPlacerPanel:toggleArmed()
+    return self:setArmed(not self.armed)
+end
+
+function UnitPlacerPanel:splitByChar(text, separator)
+    local parts = {}
+    if not text or text == "" then
+        return parts
+    end
+
+    local startIndex = 1
+    while true do
+        local separatorIndex = string.find(text, separator, startIndex, true)
+        if not separatorIndex then
+            table.insert(parts, string.sub(text, startIndex))
+            break
+        end
+
+        table.insert(parts, string.sub(text, startIndex, separatorIndex - 1))
+        startIndex = separatorIndex + #separator
+    end
+
+    return parts
+end
+
+function UnitPlacerPanel:buildCatalogFromMissionDb()
+    local bridge = getAccModBridge()
+    if not bridge then
+        return nil, "AccModBridge not available"
+    end
+
+    local innerCode = [[
+local FS = string.char(31)
+local RS = string.char(30)
+local rows = {}
+local total = 0
+
+if type(db) ~= "table" or type(db.Countries) ~= "table" then
+    return "ERR:NO_DB", 1
+end
+
+local function enc(value)
+    value = tostring(value or "")
+    value = string.gsub(value, FS, " ")
+    value = string.gsub(value, RS, " ")
+    value = string.gsub(value, "\n", " ")
+    value = string.gsub(value, "\r", " ")
+    return value
+end
+
+local function firstStringTag(tags)
+    if type(tags) ~= "table" then
+        return "General"
+    end
+
+    for _, tag in ipairs(tags) do
+        if type(tag) == "string" and tag ~= "" then
+            return tag
+        end
+    end
+
+    for _, tag in pairs(tags) do
+        if type(tag) == "string" and tag ~= "" then
+            return tag
+        end
+    end
+
+    return "General"
+end
+
+local function findCarDef(typeName)
+    local carsTable = db and db.Units and db.Units.Cars and db.Units.Cars.Car
+    if type(carsTable) ~= "table" then
+        return nil
+    end
+
+    local direct = carsTable[typeName]
+    if type(direct) == "table" then
+        return direct
+    end
+
+    for _, candidate in pairs(carsTable) do
+        if type(candidate) == "table" and candidate.Name == typeName then
+            return candidate
+        end
+    end
+
+    return nil
+end
+
+local seenEntryIds = {}
+local function addRow(countryName, typeName, unitDef)
+    if not countryName or countryName == "" or not typeName or typeName == "" then
+        return
+    end
+
+    local entryId = countryName .. "|" .. typeName
+    if seenEntryIds[entryId] then
+        return
+    end
+
+    local displayName = (unitDef and (unitDef.DisplayName or unitDef.Name)) or typeName
+    local categoryName = (unitDef and unitDef.category) or "Ground"
+    local subCategoryName = firstStringTag(unitDef and unitDef.tags)
+
+    rows[#rows + 1] = table.concat({
+        enc(countryName),
+        enc(categoryName),
+        enc(subCategoryName),
+        enc(entryId),
+        enc(displayName),
+        enc(typeName),
+    }, FS)
+
+    seenEntryIds[entryId] = true
+    total = total + 1
+end
+
+for _, countryEntry in pairs((db and db.Countries) or {}) do
+    local countryName = countryEntry and (countryEntry.Name or countryEntry.InternationalName)
+    local cars = countryEntry and countryEntry.Units and countryEntry.Units.Cars and countryEntry.Units.Cars.Car
+
+    if countryName and type(cars) == "table" then
+        for _, carRef in pairs(cars) do
+            local typeName = carRef and carRef.Name
+            if typeName and typeName ~= "#Index" then
+                local unitDef = findCarDef(typeName)
+                addRow(countryName, typeName, unitDef)
+                if total >= 300 then
+                    break
+                end
+            end
+        end
+    end
+
+    if total >= 300 then
+        break
+    end
+end
+
+if total == 0 then
+    local carsTable = db and db.Units and db.Units.Cars and db.Units.Cars.Car
+    local fallbackCountries = { "USA", "RUSSIA" }
+
+    if type(carsTable) == "table" then
+        for _, unitDef in pairs(carsTable) do
+            local typeName = unitDef and (unitDef.Name or unitDef.type)
+            if type(typeName) == "string" and typeName ~= "" and typeName ~= "#Index" then
+                for _, countryName in ipairs(fallbackCountries) do
+                    addRow(countryName, typeName, unitDef)
+                    if total >= 300 then
+                        break
+                    end
+                end
+            end
+
+            if total >= 300 then
+                break
+            end
+        end
+    end
+end
+
+if total == 0 then
+    return "ERR:NO_ROWS", 1
+end
+
+return table.concat(rows, RS), 1
+]]
+
+    local payload = nil
+    local sourceEnv = nil
+    local errorMessages = {}
+    local envOrder = { "gui", "server", "mission", "export" }
+
+    for _, envName in ipairs(envOrder) do
+        local candidatePayload = bridge.execInEnv(envName, wrapMissionScript(innerCode))
+        if type(candidatePayload) == "string" and candidatePayload ~= "" and not string.find(candidatePayload, "^ERR:") then
+            payload = candidatePayload
+            sourceEnv = envName
+            break
+        end
+
+        table.insert(errorMessages, string.format("%s:%s", envName, tostring(candidatePayload)))
+    end
+
+    if type(payload) ~= "string" or payload == "" then
+        return nil, "Catalog query failed (" .. table.concat(errorMessages, "; ") .. ")"
+    end
+
+    local FS = string.char(31)
+    local RS = string.char(30)
+    local catalog = {}
+    local entriesById = {}
+
+    local rows = self:splitByChar(payload, RS)
+    for _, row in ipairs(rows) do
+        local fields = self:splitByChar(row, FS)
+        if #fields >= 6 then
+            local countryName = fields[1]
+            local categoryName = fields[2]
+            local subCategoryName = fields[3]
+            local entryId = fields[4]
+            local displayName = fields[5]
+            local typeName = fields[6]
+
+            if countryName ~= "" and entryId ~= "" and typeName ~= "" then
+                local sideName = self:getSideNameForCountry(countryName)
+                catalog[countryName] = catalog[countryName] or {
+                    countryName = countryName,
+                    sideName = sideName,
+                    categories = {},
+                }
+
+                catalog[countryName].categories[categoryName] = catalog[countryName].categories[categoryName] or {}
+                catalog[countryName].categories[categoryName][subCategoryName] = catalog[countryName].categories[categoryName][subCategoryName] or {}
+
+                local entry = {
+                    entryId = entryId,
+                    presetName = entryId,
+                    displayName = displayName,
+                    countryName = countryName,
+                    categoryName = categoryName,
+                    subCategoryName = subCategoryName,
+                    kind = "group",
+                    groupCategory = "GROUND",
+                    typeName = typeName,
+                }
+
+                table.insert(catalog[countryName].categories[categoryName][subCategoryName], entry)
+                entriesById[entry.entryId] = entry
+            end
+        end
+    end
+
+    if next(entriesById) == nil then
+        return nil, "Mission DB parsed but produced no entries"
+    end
+
+    for _, countryEntry in pairs(catalog) do
+        for _, subMap in pairs(countryEntry.categories) do
+            for _, entries in pairs(subMap) do
+                table.sort(entries, function(a, b)
+                    return tostring(a.displayName) < tostring(b.displayName)
+                end)
+            end
+        end
+    end
+
+    return catalog, entriesById, sourceEnv
+end
+
+function UnitPlacerPanel:buildCatalogFromSnapshotDb()
+    local snapshotPath = lfs.writedir() .. [[Mods\Services\DCS-AccWidg\Scripts\UnitPlacerCatalogDB.lua]]
+    local ok, snapshot = pcall(dofile, snapshotPath)
+    if not ok then
+        return nil, "Snapshot load failed: " .. tostring(snapshot)
+    end
+
+    if type(snapshot) ~= "table" or type(snapshot.countries) ~= "table" then
+        return nil, "Snapshot missing countries table"
+    end
+
+    local catalog = {}
+    local entriesById = {}
+
+    for countryName, countryData in pairs(snapshot.countries) do
+        if type(countryName) == "string" and type(countryData) == "table" then
+            local sideName = self:getSideNameForCountry(countryName)
+            local countryEntry = {
+                countryName = countryName,
+                sideName = sideName,
+                categories = {},
+            }
+
+            local categories = countryData.categories or {}
+            for categoryName, subMap in pairs(categories) do
+                countryEntry.categories[categoryName] = countryEntry.categories[categoryName] or {}
+
+                for subCategoryName, typeEntries in pairs(subMap or {}) do
+                    countryEntry.categories[categoryName][subCategoryName] = countryEntry.categories[categoryName][subCategoryName] or {}
+
+                    for _, typeEntry in ipairs(typeEntries or {}) do
+                        local typeName = typeEntry and typeEntry.typeName
+                        if type(typeName) == "string" and typeName ~= "" then
+                            local entryKind = typeEntry.kind or "group"
+                            local groupCategory = typeEntry.groupCategory or "GROUND"
+                            local entryId = typeEntry.entryId or (countryName .. "|" .. entryKind .. "|" .. typeName)
+                            local entry = {
+                                entryId = entryId,
+                                presetName = entryId,
+                                displayName = typeEntry.displayName or typeName,
+                                countryName = countryName,
+                                categoryName = categoryName,
+                                subCategoryName = subCategoryName,
+                                kind = entryKind,
+                                groupCategory = groupCategory,
+                                typeName = typeName,
+                            }
+
+                            table.insert(countryEntry.categories[categoryName][subCategoryName], entry)
+                            entriesById[entryId] = entry
+                        end
+                    end
+
+                    table.sort(countryEntry.categories[categoryName][subCategoryName], function(a, b)
+                        return tostring(a.displayName) < tostring(b.displayName)
+                    end)
+                end
+            end
+
+            catalog[countryName] = countryEntry
+        end
+    end
+
+    if next(entriesById) == nil then
+        return nil, "Snapshot parsed but produced no entries"
+    end
+
+    return catalog, entriesById, snapshot.source or "snapshot"
+end
+
+function UnitPlacerPanel:buildPickerCatalog()
+    if self.pickerCatalog then
+        return self.pickerCatalog
+    end
+
+    local snapshotCatalog, snapshotEntries, snapshotSource = self:buildCatalogFromSnapshotDb()
+    if snapshotCatalog and snapshotEntries then
+        self.pickerCatalog = snapshotCatalog
+        self.catalogEntriesById = snapshotEntries
+        self.typeCatalog = nil
+        self.typeEntriesByKey = {}
+        log.write('AccMod', log.INFO, "UnitPlacer catalog source: snapshot (" .. tostring(snapshotSource or "unknown") .. ")")
+        return self.pickerCatalog
+    end
+
+    log.write('AccMod', log.WARNING, "UnitPlacer catalog fallback to PRESETS: " .. tostring(snapshotEntries or snapshotSource or "unknown reason"))
+
+    local catalog = {}
+    local entriesById = {}
+
+    for sideName, sideData in pairs(UnitPlacerPanel.SIDE_OPTIONS) do
+        catalog[sideData.countryName] = {
+            countryName = sideData.countryName,
+            sideName = sideName,
+            categories = {},
+        }
+    end
+
+    for presetName, preset in pairs(UnitPlacerPanel.PRESETS) do
+        local categoryName = preset.categoryName or "Other"
+        local subCategoryName = preset.subCategoryName or "General"
+        local countryNames = preset.countryNames or { "USA", "RUSSIA" }
+
+        for _, countryName in ipairs(countryNames) do
+            local countryEntry = catalog[countryName]
+            if not countryEntry then
+                countryEntry = {
+                    countryName = countryName,
+                    sideName = self:getSideNameForCountry(countryName),
+                    categories = {},
+                }
+                catalog[countryName] = countryEntry
+            end
+
+            countryEntry.categories[categoryName] = countryEntry.categories[categoryName] or {}
+            countryEntry.categories[categoryName][subCategoryName] = countryEntry.categories[categoryName][subCategoryName] or {}
+            local entryId = countryName .. "|" .. presetName
+            local entry = {
+                entryId = entryId,
+                presetName = presetName,
+                displayName = preset.displayName,
+                countryName = countryName,
+                categoryName = categoryName,
+                subCategoryName = subCategoryName,
+                kind = preset.kind,
+                groupCategory = preset.groupCategory,
+                typeName = preset.typeName,
+            }
+            table.insert(countryEntry.categories[categoryName][subCategoryName], entry)
+            entriesById[entryId] = entry
+        end
+    end
+
+    self.catalogEntriesById = entriesById
+    self.pickerCatalog = catalog
+    self.typeCatalog = nil
+    self.typeEntriesByKey = {}
+    return self.pickerCatalog
+end
+
+function UnitPlacerPanel:buildTypeCatalog()
+    if self.typeCatalog then
+        return self.typeCatalog
+    end
+
+    self:buildPickerCatalog()
+
+    local categories = {}
+    local entriesByKey = {}
+
+    for _, entry in pairs(self.catalogEntriesById or {}) do
+        local typeKey = tostring(entry.kind or "group") .. "|" .. tostring(entry.typeName or "")
+        if typeKey ~= "" and typeKey ~= "group|" then
+            local merged = entriesByKey[typeKey]
+            if not merged then
+                merged = {
+                    typeKey = typeKey,
+                    entryId = typeKey,
+                    presetName = typeKey,
+                    displayName = entry.displayName,
+                    categoryName = entry.categoryName,
+                    subCategoryName = entry.subCategoryName,
+                    kind = entry.kind,
+                    groupCategory = entry.groupCategory,
+                    typeName = entry.typeName,
+                    countryNames = {},
+                    countryNameSet = {},
+                }
+                entriesByKey[typeKey] = merged
+            end
+
+            if entry.countryName and not merged.countryNameSet[entry.countryName] then
+                merged.countryNameSet[entry.countryName] = true
+                table.insert(merged.countryNames, entry.countryName)
+            end
+        end
+    end
+
+    for _, merged in pairs(entriesByKey) do
+        table.sort(merged.countryNames)
+        local categoryName = merged.categoryName or "Other"
+        local subCategoryName = merged.subCategoryName or "General"
+        categories[categoryName] = categories[categoryName] or {}
+        categories[categoryName][subCategoryName] = categories[categoryName][subCategoryName] or {}
+        table.insert(categories[categoryName][subCategoryName], merged)
+    end
+
+    for _, subMap in pairs(categories) do
+        for _, typeList in pairs(subMap) do
+            table.sort(typeList, function(a, b)
+                return tostring(a.displayName) < tostring(b.displayName)
+            end)
+        end
+    end
+
+    self.typeCatalog = {
+        categories = categories,
+        entriesByKey = entriesByKey,
+    }
+
+    return self.typeCatalog
+end
+
+function UnitPlacerPanel:getSortedKeys(mapTable)
+    local keys = {}
+    for key in pairs(mapTable or {}) do
+        table.insert(keys, key)
+    end
+    table.sort(keys)
+    return keys
+end
+
+function UnitPlacerPanel:ensurePickerSelection()
+    self.config = UnitPlacerPanel.normalizeConfig(self.config)
+    local typeCatalog = self:buildTypeCatalog()
+    local categoryNames = self:getSortedKeys(typeCatalog.categories)
+    if #categoryNames == 0 then
+        self.config.selectedCategory = nil
+        self.config.selectedSubCategory = nil
+        self.config.selectedPreset = self.config.selectedPreset or UnitPlacerPanel.DEFAULT_PRESET_NAME
+        return
+    end
+
+    if not self.config.selectedCategory or not typeCatalog.categories[self.config.selectedCategory] then
+        self.config.selectedCategory = categoryNames[1]
+    end
+
+    local subCategoryMap = typeCatalog.categories[self.config.selectedCategory] or {}
+    local subCategoryNames = self:getSortedKeys(subCategoryMap)
+    if not self.config.selectedSubCategory or not subCategoryMap[self.config.selectedSubCategory] then
+        self.config.selectedSubCategory = subCategoryNames[1]
+    end
+
+    local typeEntries = subCategoryMap[self.config.selectedSubCategory] or {}
+    local foundPreset = false
+    for _, typeEntry in ipairs(typeEntries) do
+        if typeEntry.typeKey == self.config.selectedPreset then
+            foundPreset = true
+            break
+        end
+    end
+    if not foundPreset then
+        self.config.selectedPreset = typeEntries[1] and typeEntries[1].typeKey or UnitPlacerPanel.DEFAULT_PRESET_NAME
+    end
+
+    local selectedTypeEntry = typeCatalog.entriesByKey[self.config.selectedPreset]
+    local validCountrySet = {}
+    for _, countryName in ipairs((selectedTypeEntry and selectedTypeEntry.countryNames) or {}) do
+        validCountrySet[countryName] = true
+    end
+
+    if next(validCountrySet) ~= nil then
+        if not validCountrySet[self.config.selectedCountry] then
+            local sideCountryName = self:getCurrentSide().countryName
+            if validCountrySet[sideCountryName] then
+                self.config.selectedCountry = sideCountryName
+            else
+                self.config.selectedCountry = selectedTypeEntry.countryNames[1]
+            end
+        end
+    end
+
+    if self.config.selectedCountry then
+        self.config.coalitionSide = self:getSideNameForCountry(self.config.selectedCountry)
+    end
+end
+
+function UnitPlacerPanel:populateCombo(combo, labels, selectedLabel)
+    if not combo then
+        return
+    end
+
+    combo:clear()
+    for _, label in ipairs(labels or {}) do
+        combo:newItem(label)
+    end
+    combo:setText(selectedLabel or "")
+end
+
+function UnitPlacerPanel:refreshPickerCombos()
+    self:ensurePickerSelection()
+    local typeCatalog = self:buildTypeCatalog()
+
+    local categoryNames = self:getSortedKeys(typeCatalog.categories)
+    self:populateCombo(self.categoryCombo, categoryNames, self.config.selectedCategory)
+
+    local subCategoryMap = typeCatalog.categories[self.config.selectedCategory] or {}
+    local subCategoryNames = self:getSortedKeys(subCategoryMap)
+    self:populateCombo(self.subCategoryCombo, subCategoryNames, self.config.selectedSubCategory)
+
+    local typeEntries = subCategoryMap[self.config.selectedSubCategory] or {}
+    local typeLabels = {}
+    local selectedTypeLabel = ""
+    for _, typeEntry in ipairs(typeEntries) do
+        table.insert(typeLabels, typeEntry.displayName)
+        if typeEntry.typeKey == self.config.selectedPreset then
+            selectedTypeLabel = typeEntry.displayName
+        end
+    end
+    self:populateCombo(self.typeCombo, typeLabels, selectedTypeLabel)
+
+    local selectedTypeEntry = typeCatalog.entriesByKey[self.config.selectedPreset]
+    local countryNames = (selectedTypeEntry and selectedTypeEntry.countryNames) or {}
+    self:populateCombo(self.countryCombo, countryNames, self.config.selectedCountry)
+
+    self:syncManagerUi()
+end
+
+function UnitPlacerPanel:handleCountryChanged(countryName)
+    if not countryName or countryName == "" then
+        return
+    end
+
+    self.config.selectedCountry = countryName
+    self.config.coalitionSide = self:getSideNameForCountry(countryName)
+    self:refreshPickerCombos()
+    self:setStatusText("Country selected: " .. tostring(countryName))
+end
+
+function UnitPlacerPanel:handleCategoryChanged(categoryName)
+    if not categoryName or categoryName == "" then
+        return
+    end
+
+    self.config.selectedCategory = categoryName
+    self.config.selectedSubCategory = nil
+    self:refreshPickerCombos()
+    self:setStatusText("Category selected: " .. tostring(categoryName))
+end
+
+function UnitPlacerPanel:handleSubCategoryChanged(subCategoryName)
+    if not subCategoryName or subCategoryName == "" then
+        return
+    end
+
+    self.config.selectedSubCategory = subCategoryName
+    self:refreshPickerCombos()
+    self:setStatusText("Subcategory selected: " .. tostring(subCategoryName))
+end
+
+function UnitPlacerPanel:handleTypeChanged(displayName)
+    if not displayName or displayName == "" then
+        return
+    end
+
+    local typeCatalog = self:buildTypeCatalog()
+    local typeEntries = (((typeCatalog.categories[self.config.selectedCategory] or {})[self.config.selectedSubCategory]) or {})
+    for _, typeEntry in ipairs(typeEntries) do
+        if typeEntry.displayName == displayName then
+            self.config.selectedPreset = typeEntry.typeKey
+            break
+        end
+    end
+
+    self:refreshPickerCombos()
+    self:setStatusText("Type selected: " .. tostring(displayName))
+end
+
+function UnitPlacerPanel:attachManagerTab(hostPanel, skinSource)
+    if self.managerTab == hostPanel then
+        self:refreshPickerCombos()
+        return
+    end
+
+    self.managerTab = hostPanel
+
+    local function createLabel(text, x, y)
+        local label = Static.new()
+        hostPanel:insertWidget(label)
+        label:setBounds(x, y, 100, 20)
+        label:setText(text)
+        local labelSkin = skinSource:getSkin()
+        labelSkin.skinData.states.released[1].text.fontSize = 12
+        label:setSkin(labelSkin)
+        return label
+    end
+
+    local btnArm = Button.new(self:getArmButtonLabel())
+    hostPanel:insertWidget(btnArm)
+    btnArm:setBounds(10, 10, 124, 28)
+    btnArm:addChangeCallback(function()
+        self:toggleArmed()
+        if self.manager then
+            self.manager:saveConfiguration()
+        end
+    end)
+
+    local btnDeleteSelected = Button.new("Delete Selected")
+    hostPanel:insertWidget(btnDeleteSelected)
+    btnDeleteSelected:setBounds(138, 10, 124, 28)
+    btnDeleteSelected:addChangeCallback(function()
+        self:deleteSelectedUnit()
+    end)
+
+    local btnExportAdded = Button.new("Export Added Units")
+    hostPanel:insertWidget(btnExportAdded)
+    btnExportAdded:setBounds(266, 10, 124, 28)
+    btnExportAdded:addChangeCallback(function()
+        local ok, pathOrErr, count = self:exportAddedUnitsManifest()
+        if ok then
+            self:setStatusText(string.format("Exported %d added units to %s", count or 0, pathOrErr or ""))
+        else
+            self:setStatusText("Export failed: " .. tostring(pathOrErr or "unknown"))
+        end
+    end)
+
+    if self.manager then
+        self.manager.unitPlacerArmButtonWidget = btnArm
+    end
+
+    createLabel("Category", 10, 48)
+    self.categoryCombo = ComboList.new()
+    hostPanel:insertWidget(self.categoryCombo)
+    self.categoryCombo:setBounds(110, 48, 280, 22)
+    self.categoryCombo.onChange = function(_, item)
+        if item then
+            self:handleCategoryChanged(item:getText())
+            if self.manager then
+                self.manager:saveConfiguration()
+            end
+        end
+    end
+
+    createLabel("Subcategory", 10, 76)
+    self.subCategoryCombo = ComboList.new()
+    hostPanel:insertWidget(self.subCategoryCombo)
+    self.subCategoryCombo:setBounds(110, 76, 280, 22)
+    self.subCategoryCombo.onChange = function(_, item)
+        if item then
+            self:handleSubCategoryChanged(item:getText())
+            if self.manager then
+                self.manager:saveConfiguration()
+            end
+        end
+    end
+
+    createLabel("Type", 10, 104)
+    self.typeCombo = ComboList.new()
+    hostPanel:insertWidget(self.typeCombo)
+    self.typeCombo:setBounds(110, 104, 280, 22)
+    self.typeCombo.onChange = function(_, item)
+        if item then
+            self:handleTypeChanged(item:getText())
+            if self.manager then
+                self.manager:saveConfiguration()
+            end
+        end
+    end
+
+    createLabel("Country", 10, 132)
+    self.countryCombo = ComboList.new()
+    hostPanel:insertWidget(self.countryCombo)
+    self.countryCombo:setBounds(110, 132, 280, 22)
+    self.countryCombo.onChange = function(_, item)
+        if item then
+            self:handleCountryChanged(item:getText())
+            if self.manager then
+                self.manager:saveConfiguration()
+            end
+        end
+    end
+
+    local placerInfoText = Static.new()
+    hostPanel:insertWidget(placerInfoText)
+    placerInfoText:setBounds(10, 164, 380, 18)
+    placerInfoText:setText("Picker flow: category -> subcategory -> type -> country")
+    local placerInfoSkin = skinSource:getSkin()
+    placerInfoSkin.skinData.states.released[1].text.fontSize = 12
+    placerInfoText:setSkin(placerInfoSkin)
+
+    local placerStatusText = Static.new()
+    hostPanel:insertWidget(placerStatusText)
+    placerStatusText:setBounds(10, 186, 380, 44)
+    placerStatusText:setText(self.lastStatusText or "Idle")
+    local placerStatusSkin = skinSource:getSkin()
+    placerStatusSkin.skinData.states.released[1].text.fontSize = 12
+    placerStatusText:setSkin(placerStatusSkin)
+    if self.manager then
+        self.manager.unitPlacerStatusWidget = placerStatusText
+    end
+
+    -- ── Heading Adjustment Compass Dial ──────────────────────────────────────
+    local DIAL_SIZE = 80
+    local DIAL_HALF = DIAL_SIZE / 2   -- 40
+    local DIAL_RADIUS = 30
+    local DIAL_X = 10 + math.floor((380 - DIAL_SIZE) / 2)  -- centered
+    local DIAL_Y_START = 238
+
+    local dialPanel = Panel.new()
+    hostPanel:insertWidget(dialPanel)
+    dialPanel:setBounds(DIAL_X, DIAL_Y_START, DIAL_SIZE, DIAL_SIZE)
+
+    -- Cardinal direction labels (positioned relative to dialPanel)
+    local CARD_OFF = DIAL_RADIUS + 8  -- offset from center
+    local function makeCardinalLabel(text, lx, ly)
+        local lbl = Static.new()
+        dialPanel:insertWidget(lbl)
+        lbl:setBounds(lx, ly, 14, 14)
+        lbl:setText(text)
+    end
+    makeCardinalLabel("N", DIAL_HALF - 7, DIAL_HALF - CARD_OFF - 7)
+    makeCardinalLabel("E", DIAL_HALF + CARD_OFF - 7, DIAL_HALF - 7)
+    makeCardinalLabel("S", DIAL_HALF - 7, DIAL_HALF + CARD_OFF - 7)
+    makeCardinalLabel("W", DIAL_HALF - CARD_OFF - 7, DIAL_HALF - 7)
+
+    -- Needle: position text character at the heading angle on the rim
+    local dialNeedle = Static.new()
+    dialPanel:insertWidget(dialNeedle)
+    -- North initial position: nx = HALF + RADIUS*sin(0) - 4 = 56, ny = HALF - RADIUS*cos(0) - 4 = 12
+    dialNeedle:setBounds(DIAL_HALF - 4, DIAL_HALF - DIAL_RADIUS - 4, 8, 8)
+    dialNeedle:setText("*")
+    local needleSkin = dialNeedle:getSkin()
+    needleSkin.skinData.states.released[1].text.fontSize = 10
+    needleSkin.skinData.states.released[1].text.color = "0xff8800ff"
+    dialNeedle:setSkin(needleSkin)
+    self.headingDialNeedle = dialNeedle
+    self.headingDialHalfSize = DIAL_HALF
+    self.headingDialRadius = DIAL_RADIUS
+    self.headingDialPanel = dialPanel
+
+    -- Heading degree label (below the dial)
+    local headingLabel = Static.new()
+    hostPanel:insertWidget(headingLabel)
+    headingLabel:setBounds(DIAL_X, DIAL_Y_START + 20 + DIAL_SIZE + 4, DIAL_SIZE, 20)
+    headingLabel:setText("---")
+    local hlSkin = skinSource:getSkin()
+    hlSkin.skinData.states.released[1].text.fontSize = 13
+    headingLabel:setSkin(hlSkin)
+    self.headingDialLabel = headingLabel
+
+    -- Heading adjustment buttons: -15, -1, N, +1, +15
+    local BTN_Y = DIAL_Y_START + DIAL_SIZE + 8
+    local BTN_W = math.floor((380 - 16) / 5)  -- ~72 px each, 5 buttons across full width
+    local panelInstance = self  -- captured for button callbacks
+
+    local btnCCW15 = Button.new("-15")
+    hostPanel:insertWidget(btnCCW15)
+    btnCCW15:setBounds(10, BTN_Y, BTN_W, 24)
+    btnCCW15:addChangeCallback(function()
+        if panelInstance.selectedUnit then
+            local h = (panelInstance.selectedUnit.heading or 0) - (15 * math.pi / 180)
+            if h < 0 then h = h + 2 * math.pi end
+            panelInstance:_setSelectedHeading(h)
+            panelInstance:applySelectedUnitHeading()
+        end
+    end)
+
+    local btnCCW1 = Button.new("-1")
+    hostPanel:insertWidget(btnCCW1)
+    btnCCW1:setBounds(10 + (BTN_W + 2), BTN_Y, BTN_W, 24)
+    btnCCW1:addChangeCallback(function()
+        if panelInstance.selectedUnit then
+            local h = (panelInstance.selectedUnit.heading or 0) - (1 * math.pi / 180)
+            if h < 0 then h = h + 2 * math.pi end
+            panelInstance:_setSelectedHeading(h)
+            panelInstance:applySelectedUnitHeading()
+        end
+    end)
+
+    local btnNorth = Button.new("N")
+    hostPanel:insertWidget(btnNorth)
+    btnNorth:setBounds(10 + (BTN_W + 2) * 2, BTN_Y, BTN_W, 24)
+    btnNorth:addChangeCallback(function()
+        if panelInstance.selectedUnit then
+            panelInstance:_setSelectedHeading(0)
+            panelInstance:applySelectedUnitHeading()
+        end
+    end)
+
+    local btnCW1 = Button.new("+1")
+    hostPanel:insertWidget(btnCW1)
+    btnCW1:setBounds(10 + (BTN_W + 2) * 3, BTN_Y, BTN_W, 24)
+    btnCW1:addChangeCallback(function()
+        if panelInstance.selectedUnit then
+            local h = (panelInstance.selectedUnit.heading or 0) + (1 * math.pi / 180)
+            if h >= 2 * math.pi then h = h - 2 * math.pi end
+            panelInstance:_setSelectedHeading(h)
+            panelInstance:applySelectedUnitHeading()
+        end
+    end)
+
+    local btnCW15 = Button.new("+15")
+    hostPanel:insertWidget(btnCW15)
+    btnCW15:setBounds(10 + (BTN_W + 2) * 4, BTN_Y, BTN_W, 24)
+    btnCW15:addChangeCallback(function()
+        if panelInstance.selectedUnit then
+            local h = (panelInstance.selectedUnit.heading or 0) + (15 * math.pi / 180)
+            if h >= 2 * math.pi then h = h - 2 * math.pi end
+            panelInstance:_setSelectedHeading(h)
+            panelInstance:applySelectedUnitHeading()
+        end
+    end)
+
+    self:refreshPickerCombos()
+end
+
+function UnitPlacerPanel:createWindow()
+    local Window = require('Window')
+    self.window = Window.new()
+
+    local screenW, screenH = Gui.GetWindowSize()
+    self.windowWidth = screenW
+    self.windowHeight = screenH
+
+    self.window:setBounds(0, 0, self.windowWidth, self.windowHeight)
+    self.window:setText("")
+    self.window:setSkin(Skin.windowSkinChatMin())
+    self.window:setVisible(false)
+    self.window:setHasCursor(false)
+
+    self.panel = Panel.new()
+    self.window:insertWidget(self.panel)
+    self.panel:setBounds(0, 0, self.windowWidth, self.windowHeight)
+
+    self.infoText = Static.new()
+    self.panel:insertWidget(self.infoText)
+    self.infoText:setBounds(12, 50, 520, 70)
+    self.infoText:setText("")
+    local infoSkin = self.infoText:getSkin()
+    if not infoSkin.skinData then
+        infoSkin.skinData = { states = { released = { {} } } }
+    end
+    if not infoSkin.skinData.states then
+        infoSkin.skinData.states = { released = { {} } }
+    end
+    if not infoSkin.skinData.states.released then
+        infoSkin.skinData.states.released = { {} }
+    end
+    if not infoSkin.skinData.states.released[1] then
+        infoSkin.skinData.states.released[1] = { text = {} }
+    end
+    if not infoSkin.skinData.states.released[1].text then
+        infoSkin.skinData.states.released[1].text = {}
+    end
+    infoSkin.skinData.states.released[1].text.fontSize = 18
+    infoSkin.skinData.states.released[1].text.color = "0xffffffff"
+    self.infoText:setSkin(infoSkin)
+    self.infoText:setVisible(true)
+
+    self.clickMarker = Static.new()
+    self.panel:insertWidget(self.clickMarker)
+    self.clickMarker:setBounds(0, 0, 8, 8)
+    local markerSkin = self.clickMarker:getSkin()
+    if not markerSkin.skinData then
+        markerSkin.skinData = { states = { released = { {} } } }
+    end
+    if not markerSkin.skinData.states then
+        markerSkin.skinData.states = { released = { {} } }
+    end
+    if not markerSkin.skinData.states.released then
+        markerSkin.skinData.states.released = { {} }
+    end
+    if not markerSkin.skinData.states.released[1] then
+        markerSkin.skinData.states.released[1] = {}
+    end
+    markerSkin.skinData.states.released[1].color = "0x00ff00ff"
+    self.clickMarker:setSkin(markerSkin)
+    self.clickMarker:setVisible(false)
+
+    -- Drag marker (yellow) for moving units
+    self.dragMarker = Static.new()
+    self.panel:insertWidget(self.dragMarker)
+    self.dragMarker:setBounds(0, 0, 12, 12)
+    local dragMarkerSkin = self.dragMarker:getSkin()
+    if not dragMarkerSkin.skinData then
+        dragMarkerSkin.skinData = { states = { released = { {} } } }
+    end
+    if not dragMarkerSkin.skinData.states then
+        dragMarkerSkin.skinData.states = { released = { {} } }
+    end
+    if not dragMarkerSkin.skinData.states.released then
+        dragMarkerSkin.skinData.states.released = { {} }
+    end
+    if not dragMarkerSkin.skinData.states.released[1] then
+        dragMarkerSkin.skinData.states.released[1] = {}
+    end
+    dragMarkerSkin.skinData.states.released[1].color = "0xffff00ff"
+    self.dragMarker:setSkin(dragMarkerSkin)
+    self.dragMarker:setVisible(false)
+
+    -- Hover marker (yellow) shows closest unit to mouse cursor
+    self.hoverMarker = Static.new()
+    self.panel:insertWidget(self.hoverMarker)
+    self.hoverMarker:setBounds(0, 0, 20, 20)
+    local hoverMarkerSkin = self.hoverMarker:getSkin()
+    if not hoverMarkerSkin.skinData then
+        hoverMarkerSkin.skinData = { states = { released = { {} } } }
+    end
+    if not hoverMarkerSkin.skinData.states then
+        hoverMarkerSkin.skinData.states = { released = { {} } }
+    end
+    if not hoverMarkerSkin.skinData.states.released then
+        hoverMarkerSkin.skinData.states.released = { {} }
+    end
+    if not hoverMarkerSkin.skinData.states.released[1] then
+        hoverMarkerSkin.skinData.states.released[1] = {}
+    end
+    hoverMarkerSkin.skinData.states.released[1].color = "0xffff00cc"  -- Yellow with transparency
+    self.hoverMarker:setSkin(hoverMarkerSkin)
+    self.hoverMarker:setVisible(false)
+
+    -- Selected marker (green) shows currently selected unit
+    self.selectedMarker = Static.new()
+    self.panel:insertWidget(self.selectedMarker)
+    self.selectedMarker:setBounds(0, 0, 24, 24)
+    local selectedMarkerSkin = self.selectedMarker:getSkin()
+    if not selectedMarkerSkin.skinData then
+        selectedMarkerSkin.skinData = { states = { released = { {} } } }
+    end
+    if not selectedMarkerSkin.skinData.states then
+        selectedMarkerSkin.skinData.states = { released = { {} } }
+    end
+    if not selectedMarkerSkin.skinData.states.released then
+        selectedMarkerSkin.skinData.states.released = { {} }
+    end
+    if not selectedMarkerSkin.skinData.states.released[1] then
+        selectedMarkerSkin.skinData.states.released[1] = {}
+    end
+    selectedMarkerSkin.skinData.states.released[1].color = "0x00ff00ee"  -- Green with high visibility
+    self.selectedMarker:setSkin(selectedMarkerSkin)
+    self.selectedMarker:setVisible(false)
+
+    local panelInstance = self
+    local function isRightMouse(button)
+        return button == 2
+    end
+
+    local function isPrimaryMouse(button)
+        return not isRightMouse(button)
+    end
+
+    self.panel:addMouseDownCallback(function(_, x, y, button)
+        if isRightMouse(button) then
+            if panelInstance.draggingUnit then
+                panelInstance:cancelDrag()
+                log.write('AccMod', log.INFO, "UnitPlacer: drag cancelled via right-click")
+            elseif panelInstance.armed then
+                panelInstance:setArmed(false)
+                panelInstance:setStatusText("Placement cancelled")
+                log.write('AccMod', log.INFO, "UnitPlacer: placement cancelled via right-click")
+            end
+            return
+        end
+
+        if not isPrimaryMouse(button) then
+            return
+        end
+
+        -- Always show a brief click marker for user feedback.
+        panelInstance:showClickMarker(x, y)
+
+        log.write('AccMod', log.INFO, string.format("UnitPlacer mouse down at screen[%.1f, %.1f], armed=%s", x, y, tostring(panelInstance.armed)))
+
+        -- Deterministic behavior:
+        -- armed = place at click, unarmed = select/drag existing units.
+        if panelInstance.armed then
+            log.write('AccMod', log.INFO, "UnitPlacer armed mode: attempting placement")
+            panelInstance:attemptPlacementAtScreenPoint(x, y)
+            return
+        end
+
+        -- Unarmed mode: try selecting/dragging an existing unit.
+        log.write('AccMod', log.INFO, "UnitPlacer disarmed mode: attempting selection/drag")
+        local dragOk, dragStarted = pcall(function()
+            return panelInstance:attemptDragStart(x, y)
+        end)
+        if dragOk and dragStarted then
+            log.write('AccMod', log.INFO, "UnitPlacer: drag started successfully")
+            return
+        end
+        if not dragOk then
+            log.write('AccMod', log.ERROR, "UnitPlacer drag query failed in unarmed mode")
+        end
+
+        log.write('AccMod', log.INFO, "UnitPlacer: no unit found near click in disarmed mode")
+        panelInstance:setStatusText("No unit near click (disarmed mode)")
+    end)
+
+    self.panel:addMouseMoveCallback(function(_, x, y)
+        if panelInstance.draggingUnit then
+            panelInstance:updateDragPosition(x, y)
+        elseif panelInstance.armed then
+            panelInstance:showClickMarker(x, y)
+        else
+            -- Disarmed mode: show hover marker for closest unit
+            panelInstance:updateHoverMarker(x, y)
+        end
+    end)
+
+    self.panel:addMouseUpCallback(function(_, x, y, button)
+        if isPrimaryMouse(button) and panelInstance.draggingUnit then
+            panelInstance:completeDrag(x, y)
+        end
+    end)
+
+    self:setStatusText(self.lastStatusText ~= "" and self.lastStatusText or "Unit placer ready")
+    log.write('AccMod', log.INFO, "UnitPlacerPanel created")
+end
+
+function UnitPlacerPanel:showClickMarker(screenX, screenY)
+    if not self.clickMarker then
+        return
+    end
+
+    self.clickMarker:setBounds(screenX - 4, screenY - 4, 8, 8)
+    self.clickMarker:setVisible(true)
+    self.lastMarkerTime = os.clock()
+    self.markerVisible = true
+end
+
+function UnitPlacerPanel:updateHoverMarker(screenX, screenY)
+    if not self.hoverMarker then
+        return
+    end
+
+    -- Query for closest unit near mouse cursor
+    local unit, errMsg = self:findUnitsNearScreenPoint(screenX, screenY, 50)
+    if unit then
+        -- Convert unit world position to screen coordinates
+        local camera = self:getPlacementCamera()
+        if camera and camera.p and unit.x and unit.y and unit.z then
+            local screenPos = self:worldToScreen({x = unit.x, y = unit.y, z = unit.z}, camera)
+            if screenPos then
+                self.hoverMarker:setBounds(screenPos.x - 10, screenPos.y - 10, 20, 20)
+                self.hoverMarker:setVisible(true)
+            else
+                self.hoverMarker:setVisible(false)
+            end
+        else
+            self.hoverMarker:setVisible(false)
+        end
+    else
+        self.hoverMarker:setVisible(false)
+    end
+end
+
+function UnitPlacerPanel:updateSelectedMarker()
+    if not self.selectedMarker or not self.selectedUnit then
+        if self.selectedMarker then
+            self.selectedMarker:setVisible(false)
+        end
+        return
+    end
+
+    -- Convert selected unit world position to screen coordinates
+    local camera = self:getPlacementCamera()
+    if camera and camera.p and self.selectedUnit.x and self.selectedUnit.y and self.selectedUnit.z then
+        local screenPos = self:worldToScreen({x = self.selectedUnit.x, y = self.selectedUnit.y, z = self.selectedUnit.z}, camera)
+        if screenPos then
+            self.selectedMarker:setBounds(screenPos.x - 12, screenPos.y - 12, 24, 24)
+            self.selectedMarker:setVisible(true)
+        else
+            self.selectedMarker:setVisible(false)
+        end
+    else
+        self.selectedMarker:setVisible(false)
+    end
+end
+
+function UnitPlacerPanel:worldToScreen(worldPos, camera)
+    if not camera or not camera.p or not camera.x or not camera.y or not camera.z then
+        return nil
+    end
+
+    -- Camera vectors
+    local camPos = camera.p
+    local camForward = {x = camera.x.z, y = camera.y.z, z = camera.z.z}  -- Forward is Z axis
+    local camRight = {x = camera.x.x, y = camera.y.x, z = camera.z.x}     -- Right is X axis
+    local camUp = {x = camera.x.y, y = camera.y.y, z = camera.z.y}        -- Up is Y axis
+
+    -- World position relative to camera
+    local dx = worldPos.x - camPos.x
+    local dy = worldPos.y - camPos.y
+    local dz = worldPos.z - camPos.z
+
+    -- Transform to camera space
+    local localZ = dx * camForward.x + dy * camForward.y + dz * camForward.z
+    if localZ <= 0 then
+        -- Behind camera
+        return nil
+    end
+
+    local localX = dx * camRight.x + dy * camRight.y + dz * camRight.z
+    local localY = dx * camUp.x + dy * camUp.y + dz * camUp.z
+
+    -- Project to screen
+    local fov = getEffectiveOverlayFovDegrees() * math.pi / 180
+    local tanHalfFov = math.tan(fov / 2)
+    local aspect = self.windowWidth / self.windowHeight
+
+    local sX = (localX / localZ) / tanHalfFov / aspect
+    local sY = (localY / localZ) / tanHalfFov
+
+    -- Convert to screen coordinates
+    sX = (sX + 1) * self.windowWidth / 2
+    sY = (1 - sY) * self.windowHeight / 2
+
+    -- Check if on screen
+    if sX < 0 or sX > self.windowWidth or sY < 0 or sY > self.windowHeight then
+        return nil
+    end
+
+    return {x = sX, y = sY}
+end
+
+function UnitPlacerPanel:getPlacementCamera()
+    if AccModOverlayManager and AccModOverlayManager.vrModeEnabled == 1 and AccModOverlayManager.vrCameraOffsetLocal then
+        local vrCamera = AccModOverlayManager:getVRCameraAdjustedForAircraft()
+        if vrCamera and vrCamera.p then
+            return vrCamera
+        end
+    end
+
+    return base.Export.LoGetCameraPosition()
+end
+
+function UnitPlacerPanel:screenPointToWorldRay(screenX, screenY)
+    local camera = self:getPlacementCamera()
+    if not camera or not camera.p or not camera.x or not camera.y or not camera.z then
+        return nil, nil
+    end
+
+    local screenW, screenH = Gui.GetWindowSize()
+    local aspect = screenW / screenH
+    local tanHalfFov = math.tan(getEffectiveOverlayFovDegrees() * math.pi / 180 / 2)
+    local ndcX = ((screenX / screenW) * 2) - 1
+    local ndcY = 1 - ((screenY / screenH) * 2)
+    local leftScale = ndcX * tanHalfFov * aspect
+    local upScale = ndcY * tanHalfFov
+    local ray = {
+        x = camera.x.x + (camera.z.x * leftScale) + (camera.y.x * upScale),
+        y = camera.x.y + (camera.z.y * leftScale) + (camera.y.y * upScale),
+        z = camera.x.z + (camera.z.z * leftScale) + (camera.y.z * upScale),
+    }
+    local rayLength = math.sqrt((ray.x * ray.x) + (ray.y * ray.y) + (ray.z * ray.z))
+    if rayLength <= 1e-6 then
+        return nil, nil
+    end
+
+    ray.x = ray.x / rayLength
+    ray.y = ray.y / rayLength
+    ray.z = ray.z / rayLength
+
+    return camera, ray
+end
+
+function UnitPlacerPanel:resolveTerrainHit(screenX, screenY)
+    local camera, ray = self:screenPointToWorldRay(screenX, screenY)
+    if not camera or not ray then
+        return nil, "No camera ray available"
+    end
+
+    local selfData = base.Export.LoGetSelfData()
+    if not selfData or not selfData.Position then
+        return nil, "No player data"
+    end
+
+    self.config = UnitPlacerPanel.normalizeConfig(self.config)
+    local maxDistance = self.config.maxDistance or UnitPlacerPanel.DEFAULT_MAX_DISTANCE_METERS
+    local probeStepMeters = 1
+    local probeElevationMargin = 0.1
+    local bridge = getAccModBridge()
+    if not bridge then
+        return nil, "AccModBridge not available"
+    end
+
+    local innerCode = string.format([[ 
+local camera = { x = %.6f, y = %.6f, z = %.6f }
+local ray = { x = %.6f, y = %.6f, z = %.6f }
+local player = { x = %.6f, z = %.6f }
+local maxDistance = %.3f
+local probeStepMeters = %.3f
+local probeElevationMargin = %.3f
+
+local function terrainHeightAt(x, z)
+    return land.getHeight({ x = x, y = z })
+end
+
+local function samplePoint(t)
+    return {
+        x = camera.x + (ray.x * t),
+        y = camera.y + (ray.y * t),
+        z = camera.z + (ray.z * t),
+    }
+end
+
+local function getCountryId()
+    if country and country.id then
+        return country.id.CJTF_RED or country.id.RUSSIA or country.id.USA or 0
+    end
+    return 0
+end
+
+local function createProbe(x, z)
+    if not coalition or type(coalition.addGroup) ~= "function" then
+        return nil, nil, "ERR:PROBE_COALITION_API"
+    end
+    if not Group or not Group.Category then
+        return nil, nil, "ERR:PROBE_GROUP_API"
+    end
+
+    local uniqueBase = math.floor(((timer and timer.getAbsTime and timer.getAbsTime()) or 0) * 1000) + math.random(1000, 9999)
+    local groupName = "AccModProbe_" .. tostring(uniqueBase)
+    local unitName = groupName .. "_unit"
+    local groupData = {
+        ["visible"] = false,
+        ["taskSelected"] = false,
+        ["hidden"] = true,
+        ["units"] = {
+            [1] = {
+                ["type"] = "Soldier M4",
+                ["skill"] = "Average",
+                ["x"] = x,
+                ["y"] = z,
+                ["name"] = unitName,
+                ["heading"] = 0,
+            }
+        },
+        ["y"] = z,
+        ["x"] = x,
+        ["name"] = groupName,
+        ["start_time"] = 0,
+    }
+
+    local probeGroup = coalition.addGroup(getCountryId(), Group.Category.GROUND, groupData)
+    if not probeGroup then
+        return nil, nil, "ERR:PROBE_CREATE_FAILED"
+    end
+
+    return probeGroup, groupName, nil
+end
+
+local function destroyProbe(probeGroup, probeGroupName)
+    if probeGroup and type(probeGroup.isExist) == "function" and probeGroup:isExist() then
+        pcall(function()
+            probeGroup:destroy()
+        end)
+    end
+    if probeGroupName and Group and type(Group.getByName) == "function" then
+        local reacquired = Group.getByName(probeGroupName)
+        if reacquired and type(reacquired.isExist) == "function" and reacquired:isExist() then
+            pcall(function()
+                reacquired:destroy()
+            end)
+        end
+    end
+end
+
+local function cleanupStaleProbes()
+    if not coalition or type(coalition.getGroups) ~= "function" then
+        return
+    end
+
+    for coalitionId = 0, 2 do
+        local groups = coalition.getGroups(coalitionId)
+        if groups then
+            for _, group in ipairs(groups) do
+                if group and type(group.getName) == "function" then
+                    local groupName = group:getName()
+                    if type(groupName) == "string" and string.sub(groupName, 1, 11) == "AccModProbe" then
+                        pcall(function()
+                            group:destroy()
+                        end)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function sampleProbeAt(x, z)
+    local probeGroup, probeGroupName, createError = createProbe(x, z)
+    if not probeGroup then
+        return nil, createError or "ERR:PROBE_CREATE_FAILED"
+    end
+
+    local probeUnit = nil
+    if type(probeGroup.getUnit) == "function" then
+        probeUnit = probeGroup:getUnit(1)
+    end
+    if (not probeUnit) and type(probeGroup.getUnits) == "function" then
+        local units = probeGroup:getUnits()
+        probeUnit = units and units[1] or nil
+    end
+    if not probeUnit or type(probeUnit.isExist) ~= "function" or not probeUnit:isExist() then
+        destroyProbe(probeGroup, probeGroupName)
+        return nil, "ERR:PROBE_UNIT_MISSING"
+    end
+
+    local point = probeUnit:getPoint()
+    destroyProbe(probeGroup, probeGroupName)
+    if not point or type(point.y) ~= "number" then
+        return nil, "ERR:PROBE_POINT_MISSING"
+    end
+
+    return point, nil
+end
+
+cleanupStaleProbes()
+
+for t = probeStepMeters, maxDistance * 3, probeStepMeters do
+    local sample = samplePoint(t)
+    local planarDistance = math.sqrt(((sample.x - player.x) * (sample.x - player.x)) + ((sample.z - player.z) * (sample.z - player.z)))
+    if planarDistance > maxDistance then
+        return string.format("ERR:TOO_FAR:%%.3f", planarDistance), 1
+    end
+
+    local probePoint, probeError = sampleProbeAt(sample.x, sample.z)
+    if probeError then
+        return probeError, 1
+    end
+
+    if probePoint then
+        local elevationDelta = math.abs(sample.y - probePoint.y)
+        if elevationDelta <= probeElevationMargin then
+            return string.format("OK:%%.3f,%%.3f,%%.3f,%%.3f", probePoint.x, probePoint.y, probePoint.z, planarDistance), 1
+        end
+    end
+end
+
+cleanupStaleProbes()
+
+return "ERR:NO_TERRAIN_HIT", 1
+]],
+        camera.p.x, camera.p.y, camera.p.z,
+        ray.x, ray.y, ray.z,
+        selfData.Position.x, selfData.Position.z,
+        maxDistance,
+        probeStepMeters,
+        probeElevationMargin)
+
+    local result = bridge.execInEnv("mission", wrapMissionScript(innerCode))
+    log.write('AccMod', log.INFO, "UnitPlacer terrain query result: " .. tostring(result))
+    if type(result) ~= "string" or result == "" then
+        return nil, "Terrain query returned no result"
+    end
+
+    if result:match("^ERR:TOO_FAR:") then
+        local distance = result:match("^ERR:TOO_FAR:(.+)$")
+        return nil, string.format("Placement exceeds %.0fm (%.1fm)", maxDistance, base.tonumber(distance) or -1)
+    end
+
+    local probeErrorMessages = {
+        ERR_PROBE_COALITION_API = "Probe placement unavailable: coalition API missing",
+        ERR_PROBE_GROUP_API = "Probe placement unavailable: group API missing",
+        ERR_PROBE_CREATE_FAILED = "Probe placement failed: could not create probe",
+        ERR_PROBE_REPOSITION_FAILED = "Probe placement failed: could not reposition probe",
+        ERR_PROBE_UNIT_MISSING = "Probe placement failed: probe unit missing",
+        ERR_PROBE_POINT_MISSING = "Probe placement failed: probe point missing",
+    }
+
+    local normalizedProbeError = string.gsub(result, ":", "_")
+    if probeErrorMessages[normalizedProbeError] then
+        return nil, probeErrorMessages[normalizedProbeError]
+    end
+
+    if result ~= "ERR:NO_TERRAIN_HIT" then
+        local hitX, hitY, hitZ, distance = result:match("^OK:([^,]+),([^,]+),([^,]+),([^,]+)$")
+        if hitX and hitY and hitZ then
+            return {
+                x = base.tonumber(hitX),
+                y = base.tonumber(hitY),
+                z = base.tonumber(hitZ),
+                distance = base.tonumber(distance) or 0,
+            }, nil
+        end
+    end
+
+    return nil, "Raw result: " .. tostring(result)
+end
+
+function UnitPlacerPanel:spawnPresetAt(hitPosition)
+    local preset = self:getCurrentPreset()
+    local side = self:getCurrentSide()
+    local selectedCountryName = self.config.selectedCountry or preset.countryName or side.countryName
+    local selfData = base.Export.LoGetSelfData()
+    if not selfData or not selfData.Position then
+        return false, "No player position"
+    end
+
+    local bridge = getAccModBridge()
+    if not bridge then
+        return false, "AccModBridge not available"
+    end
+
+    local innerCode = string.format([[ 
+local spawnPoint = { x = %.3f, y = %.3f, z = %.3f }
+local player = { x = %.3f, z = %.3f }
+local preset = {
+    kind = %q,
+    groupCategory = %q,
+    typeName = %q,
+    displayName = %q,
+}
+local countryId = ((country and country.id and country.id[%q]) or %d)
+
+local function atan2(y, x)
+    if math.atan2 then
+        return math.atan2(y, x)
+    end
+    if x > 0 then
+        return math.atan(y / x)
+    end
+    if x < 0 and y >= 0 then
+        return math.atan(y / x) + math.pi
+    end
+    if x < 0 and y < 0 then
+        return math.atan(y / x) - math.pi
+    end
+    if x == 0 and y > 0 then
+        return math.pi * 0.5
+    end
+    if x == 0 and y < 0 then
+        return -math.pi * 0.5
+    end
+    return 0
+end
+
+local heading = atan2(player.z - spawnPoint.z, player.x - spawnPoint.x)
+local uniqueBase = math.floor(((timer and timer.getAbsTime and timer.getAbsTime()) or 0) * 1000) + math.random(1000, 9999)
+local safeName = string.gsub(preset.typeName, "[^%%w_]", "_")
+
+if preset.kind == "static" then
+    local staticData = {
+        ["type"] = preset.typeName,
+        ["x"] = spawnPoint.x,
+        ["y"] = spawnPoint.z,
+        ["name"] = "AccModStatic_" .. safeName .. "_" .. tostring(uniqueBase),
+        ["heading"] = heading,
+    }
+
+    local staticObject = coalition.addStaticObject(countryId, staticData)
+    if staticObject then
+        return "OK:" .. staticData.name, 1
+    end
+
+    return "ERR:static spawn failed", 1
+end
+
+local groupCategory = Group.Category[preset.groupCategory] or Group.Category.GROUND
+local groupName = "AccModGroup_" .. safeName .. "_" .. tostring(uniqueBase)
+local unitName = "AccModUnit_" .. safeName .. "_" .. tostring(uniqueBase)
+local groupData = {
+    ["visible"] = true,
+    ["taskSelected"] = true,
+    ["hidden"] = false,
+    ["units"] = {
+        [1] = {
+            ["type"] = preset.typeName,
+            ["unitId"] = uniqueBase,
+            ["skill"] = "Average",
+            ["x"] = spawnPoint.x,
+            ["y"] = spawnPoint.z,
+            ["name"] = unitName,
+            ["heading"] = heading,
+        }
+    },
+    ["y"] = spawnPoint.z,
+    ["x"] = spawnPoint.x,
+    ["name"] = groupName,
+    ["start_time"] = 0,
+}
+
+local group = coalition.addGroup(countryId, groupCategory, groupData)
+if group then
+    local coalitionOf = group:getCoalition() or 1
+    return string.format("OK:G=%%s|U=%%s|H=%%.6f|T=%%s|C=%%d|K=%%d", groupName, unitName, heading, preset.typeName, coalitionOf, countryId), 1
+end
+
+return "ERR:group spawn failed", 1
+]],
+        hitPosition.x, hitPosition.y, hitPosition.z,
+        selfData.Position.x, selfData.Position.z,
+        preset.kind, preset.groupCategory or "GROUND", preset.typeName, preset.displayName,
+    selectedCountryName, side.fallbackCountryId or 2)
+
+    local result = bridge.execInEnv("mission", wrapMissionScript(innerCode))
+    if type(result) == "string" and result:match("^OK:") then
+        local body = result:sub(4)
+        local gName = body:match("G=([^|]+)")
+        local uName = body:match("U=([^|]+)")
+        local h     = tonumber(body:match("H=([^|]+)"))
+        local tName = body:match("T=([^|]+)")
+        local cId   = tonumber(body:match("C=(%d+)"))
+        local countryId = tonumber(body:match("K=(%d+)"))
+        if gName and uName then
+            return true, {
+                groupName = gName,
+                unitName = uName,
+                heading = h or 0,
+                typeName = tName,
+                coalition = cId or 1,
+                countryId = countryId,
+            }
+        end
+        -- Static or legacy format
+        return true, { staticName = body }
+    end
+
+    return false, tostring(result or "Unknown mission error")
+end
+
+function UnitPlacerPanel:attemptPlacementAtScreenPoint(screenX, screenY)
+    self:showClickMarker(screenX, screenY)
+
+    local hitPosition, hitError = self:resolveTerrainHit(screenX, screenY)
+    if not hitPosition then
+        self:setStatusText(hitError)
+        return
+    end
+
+    local ok, spawnInfo = self:spawnPresetAt(hitPosition)
+    if ok then
+        local preset = self:getCurrentPreset()
+        local displayName = (type(spawnInfo) == "table")
+            and (spawnInfo.groupName or spawnInfo.staticName or "?")
+            or tostring(spawnInfo)
+        local statusText = string.format("Spawned at %.0fm (x=%.1f z=%.1f): %s",
+            hitPosition.distance or 0, hitPosition.x, hitPosition.z, displayName)
+        self:setStatusText(statusText)
+        -- Auto-select spawned unit so heading dial is ready immediately
+        if type(spawnInfo) == "table" and spawnInfo.unitName then
+            self:registerAddedUnitFromSpawn(spawnInfo, hitPosition, preset, self.config and self.config.selectedCountry)
+            self:selectUnit({
+                name     = spawnInfo.unitName,
+                groupName = spawnInfo.groupName,
+                x = hitPosition.x,
+                y = hitPosition.y,
+                z = hitPosition.z,
+                heading  = spawnInfo.heading or 0,
+                typeName = spawnInfo.typeName,
+                coalition = spawnInfo.coalition or 1,
+                countryId = spawnInfo.countryId,
+            })
+        end
+        self:setArmed(false)
+        return
+    end
+
+    local errorText = "Spawn failed: " .. tostring(spawnInfo)
+    self:setStatusText(errorText)
+end
+
+function UnitPlacerPanel:findUnitsNearScreenPoint(screenX, screenY, maxSearchRadius)
+    maxSearchRadius = maxSearchRadius or 100
+    local bridge = getAccModBridge()
+    if not bridge then
+        return nil, "AccModBridge not available"
+    end
+
+    local camera = self:getPlacementCamera()
+    if not camera or not camera.p then
+        return nil, "No camera available"
+    end
+
+    local selfData = base.Export.LoGetSelfData()
+    if not selfData or not selfData.Position then
+        return nil, "No player data"
+    end
+
+    local innerCode = string.format([[
+local camera = { x = %.6f, y = %.6f, z = %.6f }
+local camForward = { x = %.6f, y = %.6f, z = %.6f }
+local camUp = { x = %.6f, y = %.6f, z = %.6f }
+local camLeft = { x = %.6f, y = %.6f, z = %.6f }
+local searchRadius = %.3f
+local screenX = %.3f
+local screenY = %.3f
+local screenW = %.3f
+local screenH = %.3f
+local tanHalfFov = %.6f
+local aspect = %.6f
+
+local function worldToScreen(worldPos)
+    local dx = worldPos.x - camera.x
+    local dy = worldPos.y - camera.y
+    local dz = worldPos.z - camera.z
+    
+    local localZ = dx * camForward.x + dy * camForward.y + dz * camForward.z
+    if localZ <= 0 then return nil, nil end
+    
+    local localX = dx * camLeft.x + dy * camLeft.y + dz * camLeft.z
+    local localY = dx * camUp.x + dy * camUp.y + dz * camUp.z
+    
+    local sX = (localX / localZ) / tanHalfFov / aspect
+    local sY = (localY / localZ) / tanHalfFov
+    
+    sX = (sX + 1) * screenW / 2
+    sY = (1 - sY) * screenH / 2
+    
+    return sX, sY
+end
+
+local function atan2Safe(y, x)
+    if math.atan2 then
+        return math.atan2(y, x)
+    end
+    if x > 0 then
+        return math.atan(y / x)
+    end
+    if x < 0 and y >= 0 then
+        return math.atan(y / x) + math.pi
+    end
+    if x < 0 and y < 0 then
+        return math.atan(y / x) - math.pi
+    end
+    if x == 0 and y > 0 then
+        return math.pi * 0.5
+    end
+    if x == 0 and y < 0 then
+        return -math.pi * 0.5
+    end
+    return 0
+end
+
+local function getUnitHeadingSafe(unit, pos)
+    if unit and type(unit.getHeading) == "function" then
+        local h = unit:getHeading()
+        if type(h) == "number" then
+            return h
+        end
+    end
+
+    if pos and pos.x and type(pos.x.x) == "number" and type(pos.x.z) == "number" then
+        return atan2Safe(pos.x.z, pos.x.x)
+    end
+
+    return 0
+end
+
+local unitsNearby = {}
+
+if not coalition or type(coalition.getGroups) ~= "function" then
+    return "ERR:COALITION_API", 1
+end
+
+-- Check coalitions for groups
+for coalitionId = 0, 2 do
+    local groups = coalition.getGroups(coalitionId)
+    if groups then
+        for _, group in ipairs(groups) do
+            if group then
+                local units = group:getUnits()
+                if units then
+                    for _, unit in ipairs(units) do
+                        local exists = unit and type(unit.isExist) == "function" and unit:isExist()
+                        local alive = (not unit) and false or (type(unit.isAlive) ~= "function" or unit:isAlive())
+                        if exists and alive then
+                            local pos = unit:getPosition()
+                            if pos and pos.p then
+                                local sX, sY = worldToScreen(pos.p)
+                                if sX and sY then
+                                    local dist = math.sqrt((sX - screenX)^2 + (sY - screenY)^2)
+                                    if dist <= searchRadius then
+                                        local typeName = unit:getTypeName() or "Unknown"
+                                        local coalitionOf = unit:getCoalition() or coalitionId
+                                        table.insert(unitsNearby, {
+                                            name = unit:getName(),
+                                            groupName = group:getName(),
+                                            x = pos.p.x,
+                                            y = pos.p.y,
+                                            z = pos.p.z,
+                                            heading = getUnitHeadingSafe(unit, pos),
+                                            typeName = typeName,
+                                            coalition = coalitionOf,
+                                            screenDist = dist,
+                                        })
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+if #unitsNearby == 0 then
+    return "ERR:NO_UNITS", 1
+end
+
+-- Sort by screen distance
+table.sort(unitsNearby, function(a, b) return a.screenDist < b.screenDist end)
+
+local result = {}
+for i, unit in ipairs(unitsNearby) do
+    if i <= 10 then  -- Limit to 10 closest units
+        table.insert(result, string.format("%%s|%%s|%%.3f|%%.3f|%%.3f|%%.6f|%%s|%%d",
+            unit.name, unit.groupName, unit.x, unit.y, unit.z, unit.heading or 0, unit.typeName, unit.coalition))
+    end
+end
+
+return table.concat(result, "\n"), 1
+]],
+        camera.p.x, camera.p.y, camera.p.z,
+    camera.x.x, camera.x.y, camera.x.z,
+    camera.y.x, camera.y.y, camera.y.z,
+    camera.z.x, camera.z.y, camera.z.z,
+        maxSearchRadius,
+        screenX, screenY,
+        self.windowWidth, self.windowHeight,
+        math.tan(getEffectiveOverlayFovDegrees() * math.pi / 180 / 2),
+        self.windowWidth / self.windowHeight)
+
+    local result = bridge.execInEnv("mission", wrapMissionScript(innerCode))
+    
+    if type(result) ~= "string" or result:match("^ERR:") then
+        return nil, tostring(result or "Unknown error")
+    end
+
+    local units = {}
+    for line in (result .. "\n"):gmatch("([^\n]*)\n") do
+        if line ~= "" then
+            local name, groupName, x, y, z, heading, typeName, coalitionOf = line:match("([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)")
+            if name and groupName and x and y and z then
+                table.insert(units, {
+                    name = name,
+                    groupName = groupName,
+                    x = tonumber(x),
+                    y = tonumber(y),
+                    z = tonumber(z),
+                    heading = tonumber(heading) or 0,
+                    typeName = typeName,
+                    coalition = tonumber(coalitionOf) or 1,
+                })
+            end
+        end
+    end
+
+    if #units == 0 then
+        return nil, "No units found near click"
+    end
+
+    return units[1], nil  -- Return closest unit
+end
+
+function UnitPlacerPanel:attemptDragStart(screenX, screenY)
+    -- Try to find a unit near the click point
+    local unit, errorMsg = self:findUnitsNearScreenPoint(screenX, screenY, 80)
+
+    if not unit then
+        -- Fallback: world-space nearest-unit query around click terrain hit.
+        local hitPosition, _ = self:resolveTerrainHit(screenX, screenY)
+        if hitPosition then
+            unit, errorMsg = self:findUnitsNearWorldPoint(hitPosition.x, hitPosition.z, 120)
+        end
+    end
+    
+    if not unit then
+        return false
+    end
+    
+    -- Never allow moving/rotating the player's unit
+    local selfData = base.Export.LoGetSelfData()
+    if selfData and selfData.Name and unit.name == selfData.Name then
+        log.write('AccMod', log.WARNING, "UnitPlacer: Cannot drag player unit")
+        self:setStatusText("Cannot move player unit")
+        return false
+    end
+
+    -- Found a unit, start dragging
+    self.draggingUnit = unit
+    self.dragStartX = screenX
+    self.dragStartY = screenY
+    self.dragLastScreenX = screenX
+    self.dragLastScreenY = screenY
+    
+    -- Resolve world position at the start
+    local hitPosition, _ = self:resolveTerrainHit(screenX, screenY)
+    self.dragStartWorldPos = hitPosition
+    self.dragPendingHitPosition = hitPosition
+    self.lastDragUpdateTime = 0
+    
+    -- Initialize heading from the unit
+    self.dragOriginalHeading = unit.heading or 0
+    self.dragCurrentHeading = self.dragOriginalHeading
+    
+    -- Hide hover marker during drag
+    if self.hoverMarker then
+        self.hoverMarker:setVisible(false)
+    end
+    
+    if self.dragMarker then
+        self.dragMarker:setBounds(screenX - 6, screenY - 6, 12, 12)
+        self.dragMarker:setVisible(true)
+    end
+    
+    -- Select this unit so the heading dial reflects it
+    self:selectUnit(unit)
+
+    self:setStatusText(string.format("Dragging: %s (release to move, short click to just select)", unit.name))
+    return true
+end
+
+function UnitPlacerPanel:findUnitsNearWorldPoint(worldX, worldZ, maxSearchRadiusMeters)
+    maxSearchRadiusMeters = maxSearchRadiusMeters or 120
+
+    local bridge = getAccModBridge()
+    if not bridge then
+        return nil, "AccModBridge not available"
+    end
+
+    local innerCode = string.format([[
+local targetX = %.3f
+local targetZ = %.3f
+local maxRadius = %.3f
+
+if not coalition or type(coalition.getGroups) ~= "function" then
+    return "ERR:COALITION_API", 1
+end
+
+local best = nil
+local bestDist = nil
+
+local function getUnitHeadingSafe(unit, pos)
+    if unit and type(unit.getHeading) == "function" then
+        local h = unit:getHeading()
+        if type(h) == "number" then
+            return h
+        end
+    end
+    if pos and pos.x and type(pos.x.x) == "number" and type(pos.x.z) == "number" then
+        if math.atan2 then
+            return math.atan2(pos.x.z, pos.x.x)
+        end
+        if pos.x.x > 0 then
+            return math.atan(pos.x.z / pos.x.x)
+        end
+    end
+    return 0
+end
+
+for coalitionId = 0, 2 do
+    local groups = coalition.getGroups(coalitionId)
+    if groups then
+        for _, group in ipairs(groups) do
+            if group then
+                local units = group:getUnits()
+                if units then
+                    for _, unit in ipairs(units) do
+                        local exists = unit and type(unit.isExist) == "function" and unit:isExist()
+                        local alive = (not unit) and false or (type(unit.isAlive) ~= "function" or unit:isAlive())
+                        if exists and alive then
+                            local pos = unit:getPosition()
+                            if pos and pos.p then
+                                local dx = pos.p.x - targetX
+                                local dz = pos.p.z - targetZ
+                                local d = math.sqrt(dx * dx + dz * dz)
+                                if d <= maxRadius and (not bestDist or d < bestDist) then
+                                    bestDist = d
+                                    local typeName = unit:getTypeName() or "Unknown"
+                                    local coalitionOf = unit:getCoalition() or coalitionId
+                                    best = {
+                                        unit:getName(),
+                                        group:getName(),
+                                        pos.p.x,
+                                        pos.p.y,
+                                        pos.p.z,
+                                        getUnitHeadingSafe(unit, pos),
+                                        typeName,
+                                        coalitionOf,
+                                    }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+if not best then
+    return "ERR:NO_UNITS", 1
+end
+
+return string.format("%%s|%%s|%%.3f|%%.3f|%%.3f|%%.6f|%%s|%%d", best[1], best[2], best[3], best[4], best[5], best[6], best[7], best[8]), 1
+]], worldX, worldZ, maxSearchRadiusMeters)
+
+    local result = bridge.execInEnv("mission", wrapMissionScript(innerCode))
+    if type(result) ~= "string" or result:match("^ERR:") then
+        return nil, tostring(result or "Unknown error")
+    end
+
+    local name, groupName, x, y, z, heading, typeName, coalitionOf = result:match("([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)")
+    if not (name and groupName and x and y and z) then
+        return nil, "No units found near click"
+    end
+
+    return {
+        name = name,
+        groupName = groupName,
+        x = tonumber(x),
+        y = tonumber(y),
+        z = tonumber(z),
+        heading = tonumber(heading) or 0,
+        typeName = typeName,
+        coalition = tonumber(coalitionOf) or 1,
+    }, nil
+end
+
+function UnitPlacerPanel:updateDragPosition(screenX, screenY)
+    if not self.draggingUnit or not self.dragMarker then
+        return
+    end
+
+    self.dragLastScreenX = screenX
+    self.dragLastScreenY = screenY
+
+    -- Update visual marker
+    self.dragMarker:setBounds(screenX - 6, screenY - 6, 12, 12)
+    self.dragMarker:setVisible(true)
+    
+    -- Throttle preview updates (only every 100ms)
+    local now = os.clock()
+    if not self.lastDragUpdateTime or (now - self.lastDragUpdateTime) > 0.1 then
+        self.lastDragUpdateTime = now
+        
+        -- Resolve terrain hit for preview only; movement happens on release.
+        local hitPosition, errorMsg = self:resolveTerrainHit(screenX, screenY)
+        if hitPosition then
+            self.dragPendingHitPosition = hitPosition
+        else
+            self.dragPendingHitPosition = nil
+        end
+    end
+    
+    -- Update status with current heading
+    local headingDegrees = self.dragCurrentHeading * 180 / math.pi
+    if self.dragPendingHitPosition then
+        self:setStatusText(string.format("Preview: %s -> (%.1f, %.1f) hdg %.1f deg",
+            self.draggingUnit.name,
+            self.dragPendingHitPosition.x or 0,
+            self.dragPendingHitPosition.z or 0,
+            headingDegrees))
+    else
+        self:setStatusText(string.format("Preview: %s (no valid drop point) hdg %.1f deg",
+            self.draggingUnit.name,
+            headingDegrees))
+    end
+end
+
+function UnitPlacerPanel:completeDrag(screenX, screenY)
+    log.write('AccMod', log.INFO, string.format("UnitPlacer completeDrag called at screen[%.1f, %.1f], draggingUnit=%s", screenX, screenY, tostring(self.draggingUnit and self.draggingUnit.name or "nil")))
+    
+    if not self.draggingUnit then
+        log.write('AccMod', log.WARNING, "UnitPlacer completeDrag: no unit being dragged")
+        return
+    end
+
+    -- Short-click (< 8px): just select the unit, don't move it
+    local dragDist = math.sqrt((screenX - self.dragStartX)^2 + (screenY - self.dragStartY)^2)
+    log.write('AccMod', log.INFO, string.format("UnitPlacer drag distance: %.1f px", dragDist))
+    
+    if dragDist < 8 then
+        log.write('AccMod', log.INFO, "UnitPlacer: short click detected, selecting unit without moving")
+        self:selectUnit(self.draggingUnit)
+        self:setStatusText(string.format("Selected: %s (use buttons to rotate)", self.draggingUnit.name))
+        self.dragPendingHitPosition = nil
+        self.draggingUnit = nil
+        if self.dragMarker then self.dragMarker:setVisible(false) end
+        return
+    end
+
+    -- Move once on release using the latest preview hit point.
+    log.write('AccMod', log.INFO, string.format("UnitPlacer: drag completed for %s", self.draggingUnit.name))
+
+    -- Use the latest tracked drag cursor point to avoid stale mouse-up coordinates.
+    local releaseX = self.dragLastScreenX or screenX
+    local releaseY = self.dragLastScreenY or screenY
+    local hitPosition, hitError = self:resolveTerrainHit(releaseX, releaseY)
+
+    if not hitPosition then
+        self:setStatusText(string.format("Move failed: no valid drop point for %s (%s)", self.draggingUnit.name, tostring(hitError or "unknown")))
+        self.dragPendingHitPosition = nil
+        self.draggingUnit = nil
+        if self.dragMarker then
+            self.dragMarker:setVisible(false)
+        end
+        return
+    end
+
+    local headingToUse = (self.selectedUnit and self.selectedUnit.heading) or self.dragCurrentHeading
+    local ok, moveError = self:moveUnitTo(self.draggingUnit, hitPosition, headingToUse)
+    if not ok then
+        self:setStatusText(string.format("Move failed: %s", tostring(moveError or "unknown")))
+        self.dragPendingHitPosition = nil
+        self.draggingUnit = nil
+        if self.dragMarker then
+            self.dragMarker:setVisible(false)
+        end
+        return
+    end
+
+    self.draggingUnit.x = hitPosition.x
+    self.draggingUnit.y = hitPosition.y
+    self.draggingUnit.z = hitPosition.z
+    self.draggingUnit.heading = headingToUse
+
+    if self.selectedUnit and self.selectedUnit.name == self.draggingUnit.name then
+        self.selectedUnit.x = hitPosition.x
+        self.selectedUnit.y = hitPosition.y
+        self.selectedUnit.z = hitPosition.z
+        self.selectedUnit.heading = headingToUse
+    end
+
+    local headingDegrees = self.dragCurrentHeading * 180 / math.pi
+    self:selectUnit(self.draggingUnit)
+    self:setStatusText(string.format("Moved %s to (%.1f, %.1f) hdg %.1f deg",
+        self.draggingUnit.name, hitPosition.x or 0, hitPosition.z or 0, headingDegrees))
+    
+    self.dragPendingHitPosition = nil
+    self.draggingUnit = nil
+    if self.dragMarker then
+        self.dragMarker:setVisible(false)
+    end
+end
+
+function UnitPlacerPanel:cancelDrag()
+    if self.draggingUnit then
+        self:setStatusText(string.format("Move cancelled: %s", self.draggingUnit.name))
+    end
+    self.dragPendingHitPosition = nil
+    self.dragLastScreenX = 0
+    self.dragLastScreenY = 0
+    self.draggingUnit = nil
+    if self.dragMarker then
+        self.dragMarker:setVisible(false)
+    end
+end
+
+function UnitPlacerPanel:moveUnitTo(unit, newPosition, newHeading)
+    log.write('AccMod', log.INFO, string.format("UnitPlacer moveUnitTo: %s (group: %s) to [%.1f, %.1f, %.1f], heading %.1f deg", tostring(unit.name), tostring(unit.groupName), newPosition.x, newPosition.y, newPosition.z, (newHeading or unit.heading or 0) * 180 / math.pi))
+    
+    if not unit or not newPosition then
+        log.write('AccMod', log.ERROR, "UnitPlacer moveUnitTo: Invalid unit or position")
+        return false, "Invalid unit or position"
+    end
+    
+    if not unit.typeName then
+        log.write('AccMod', log.ERROR, "UnitPlacer moveUnitTo: Unit missing typeName")
+        return false, "Unit missing typeName"
+    end
+    
+    newHeading = newHeading or unit.heading or 0
+
+    local bridge = getAccModBridge()
+    if not bridge then
+        log.write('AccMod', log.ERROR, "UnitPlacer moveUnitTo: AccModBridge not available")
+        return false, "AccModBridge not available"
+    end
+
+    -- DCS has no setPosition API. Explicitly destroy and respawn the unit.
+    local innerCode = string.format([[
+local unitName = %q
+local groupName = %q
+local typeName = %q
+local newX = %.3f
+local newY = %.3f
+local newZ = %.3f
+local newHeading = %.6f
+local coalitionId = %d
+
+if not coalition or type(coalition.getGroups) ~= "function" or type(coalition.addGroup) ~= "function" then
+    return "ERR:coalition_api", 1
+end
+
+-- Find and explicitly destroy the old group
+local oldGroup = nil
+for cId = 0, 2 do
+    local groups = coalition.getGroups(cId)
+    if groups then
+        for _, group in ipairs(groups) do
+            if group and group:getName() == groupName then
+                coalitionId = cId
+                oldGroup = group
+                break
+            end
+        end
+    end
+    if oldGroup then break end
+end
+
+if oldGroup then
+    oldGroup:destroy()
+end
+
+-- Determine country from coalition
+local countryId = 0
+if coalitionId == 1 then
+    countryId = 2  -- USA for red
+elseif coalitionId == 2 then
+    countryId = 2  -- USA for blue
+else
+    countryId = 0  -- Neutral
+end
+
+-- Spawn the unit at the new position
+local groupData = {
+    ["visible"] = false,
+    ["taskSelected"] = true,
+    ["route"] = {},
+    ["groupId"] = nil,  -- Let DCS assign
+    ["tasks"] = {},
+    ["hidden"] = false,
+    ["units"] = {
+        [1] = {
+            ["type"] = typeName,
+            ["unitId"] = nil,  -- Let DCS assign
+            ["skill"] = "Average",
+            ["y"] = newZ,
+            ["x"] = newX,
+            ["name"] = unitName,
+            ["heading"] = newHeading,
+        },
+    },
+    ["y"] = newZ,
+    ["x"] = newX,
+    ["name"] = groupName,
+    ["start_time"] = 0,
+}
+
+local newGroup = coalition.addGroup(countryId, Group.Category.GROUND, groupData)
+if newGroup then
+    return "OK:moved", 1
+end
+
+return "ERR:respawn_failed", 1
+]],
+        unit.name, unit.groupName, unit.typeName,
+        newPosition.x, newPosition.y, newPosition.z, newHeading,
+        unit.coalition or 1)
+
+    log.write('AccMod', log.INFO, "UnitPlacer moveUnitTo: executing destroy+respawn mission script")
+    local result = bridge.execInEnv("mission", wrapMissionScript(innerCode))
+    log.write('AccMod', log.INFO, "UnitPlacer moveUnitTo result: " .. tostring(result))
+    
+    if type(result) == "string" and result:match("^OK:") then
+        log.write('AccMod', log.INFO, "UnitPlacer moveUnitTo SUCCESS")
+        self:updateTrackedUnitFinalState(unit, newPosition, newHeading)
+        return true, result:sub(4)
+    end
+
+    log.write('AccMod', log.ERROR, "UnitPlacer moveUnitTo FAILED: " .. tostring(result))
+    return false, tostring(result or "Unknown mission error")
+end
+
+-- Call to select a unit; updates the dial header and needle display.
+function UnitPlacerPanel:selectUnit(unitData)
+    self.selectedUnit = unitData
+    if not unitData then
+        if self.headingDialLabel then
+            self.headingDialLabel:setText("---")
+        end
+        if self.selectedMarker then
+            self.selectedMarker:setVisible(false)
+        end
+        return
+    end
+
+    self.dragCurrentHeading = unitData.heading or 0
+    self:_updateDialDisplay(unitData.heading or 0)
+    self:updateSelectedMarker()
+end
+
+-- Normalize and store new heading on the selected unit, then update needle display.
+function UnitPlacerPanel:_setSelectedHeading(heading)
+    while heading < 0 do heading = heading + 2 * math.pi end
+    while heading >= 2 * math.pi do heading = heading - 2 * math.pi end
+    if self.selectedUnit then
+        self.selectedUnit.heading = heading
+    end
+    self.dragCurrentHeading = heading
+    self:_updateDialDisplay(heading)
+end
+
+-- Reposition the needle sprite and update the degree label.
+function UnitPlacerPanel:_updateDialDisplay(heading)
+    local HALF   = self.headingDialHalfSize or 60
+    local RADIUS = self.headingDialRadius or 44
+    if self.headingDialNeedle then
+        local nx = HALF + RADIUS * math.sin(heading) - 4
+        local ny = HALF - RADIUS * math.cos(heading) - 4
+        self.headingDialNeedle:setBounds(nx, ny, 8, 8)
+    end
+    if self.headingDialLabel then
+        local deg = heading * 180 / math.pi
+        self.headingDialLabel:setText(string.format("%.1f deg", deg))
+    end
+end
+
+-- Send the selected unit's current heading to the mission environment.
+function UnitPlacerPanel:applySelectedUnitHeading()
+    local unit = self.selectedUnit
+    if not unit then
+        log.write('AccMod', log.WARNING, "UnitPlacer heading apply: no unit selected")
+        return
+    end
+    
+    -- Never allow rotating the player's unit
+    local selfData = base.Export.LoGetSelfData()
+    if selfData and selfData.Name and unit.name == selfData.Name then
+        log.write('AccMod', log.WARNING, "UnitPlacer: Cannot rotate player unit")
+        self:setStatusText("Cannot rotate player unit")
+        return
+    end
+    
+    if not unit.typeName then
+        log.write('AccMod', log.ERROR, "UnitPlacer heading apply: Unit missing typeName")
+        self:setStatusText("Unit missing type - cannot rotate")
+        return
+    end
+
+    local bridge = getAccModBridge()
+    if not bridge then
+        log.write('AccMod', log.ERROR, "UnitPlacer heading apply: AccModBridge not available")
+        self:setStatusText("Bridge not available")
+        return
+    end
+
+    local heading = unit.heading or 0
+    local deg = heading * 180 / math.pi
+    log.write('AccMod', log.INFO, string.format("UnitPlacer applying heading %.1f deg to %s (group: %s)", deg, tostring(unit.name), tostring(unit.groupName)))
+    
+    -- DCS has no setPosition or setHeading API. We must explicitly destroy and respawn the unit.
+    local innerCode = string.format([[
+local unitName = %q
+local groupName = %q
+local typeName = %q
+local newHeading = %.6f
+local coalitionId = %d
+
+if not coalition or type(coalition.getGroups) ~= "function" or type(coalition.addGroup) ~= "function" then
+    return "ERR:coalition_api", 1
+end
+
+-- Find the unit to get its current position, then destroy the group
+local oldGroup = nil
+local oldPos = nil
+for cId = 0, 2 do
+    local groups = coalition.getGroups(cId)
+    if groups then
+        for _, group in ipairs(groups) do
+            if group and group:getName() == groupName then
+                local units = group:getUnits()
+                if units then
+                    for _, u in ipairs(units) do
+                        if u and u:getName() == unitName then
+                            oldPos = u:getPosition()
+                            coalitionId = cId
+                            oldGroup = group
+                            break
+                        end
+                    end
+                end
+                if oldGroup then break end
+            end
+        end
+    end
+    if oldGroup then break end
+end
+
+if not oldPos or not oldPos.p then
+    return "ERR:unit_not_found", 1
+end
+
+-- Explicitly destroy the old group
+if oldGroup then
+    oldGroup:destroy()
+end
+
+-- Determine country from coalition
+local countryId = 0
+if coalitionId == 1 then
+    countryId = 2  -- USA for red
+elseif coalitionId == 2 then
+    countryId = 2  -- USA for blue
+else
+    countryId = 0  -- Neutral
+end
+
+-- Spawn the unit at same position with new heading
+local groupData = {
+    ["visible"] = false,
+    ["taskSelected"] = true,
+    ["route"] = {},
+    ["groupId"] = nil,  -- Let DCS assign
+    ["tasks"] = {},
+    ["hidden"] = false,
+    ["units"] = {
+        [1] = {
+            ["type"] = typeName,
+            ["unitId"] = nil,  -- Let DCS assign
+            ["skill"] = "Average",
+            ["y"] = oldPos.p.z,
+            ["x"] = oldPos.p.x,
+            ["name"] = unitName,
+            ["heading"] = newHeading,
+        },
+    },
+    ["y"] = oldPos.p.z,
+    ["x"] = oldPos.p.x,
+    ["name"] = groupName,
+    ["start_time"] = 0,
+}
+
+local newGroup = coalition.addGroup(countryId, Group.Category.GROUND, groupData)
+if newGroup then
+    return "OK:rotated", 1
+end
+
+return "ERR:respawn_failed", 1
+]], unit.name, unit.groupName, unit.typeName, heading, unit.coalition or 1)
+
+    local result = bridge.execInEnv("mission", wrapMissionScript(innerCode))
+    
+    if type(result) == "string" and result:match("^OK") then
+        self:updateTrackedUnitFinalState(unit, {
+            x = unit.x,
+            y = unit.y,
+            z = unit.z,
+        }, heading)
+        log.write('AccMod', log.INFO, string.format("UnitPlacer heading apply SUCCESS for %s -> %.1f deg", tostring(unit.name), deg))
+        self:setStatusText(string.format("Rotated %s to %.1f deg", unit.name, deg))
+    else
+        log.write('AccMod', log.ERROR, string.format("UnitPlacer heading apply FAILED for %s: %s", tostring(unit.name), tostring(result or "unknown")))
+        self:setStatusText("Rotation failed: " .. tostring(result or "unknown"))
+    end
+end
+
+function UnitPlacerPanel:deleteSelectedUnit()
+    local unit = self.selectedUnit
+    if not unit then
+        self:setStatusText("No selected unit to delete")
+        return false
+    end
+
+    local selfData = base.Export.LoGetSelfData()
+    if selfData and selfData.Name and unit.name == selfData.Name then
+        log.write('AccMod', log.WARNING, "UnitPlacer: Cannot delete player unit")
+        self:setStatusText("Cannot delete player unit")
+        return false
+    end
+
+    local bridge = getAccModBridge()
+    if not bridge then
+        self:setStatusText("Bridge not available")
+        return false
+    end
+
+    local unitName = unit.name
+    local groupName = unit.groupName
+    local innerCode = string.format([[
+local targetUnitName = %q
+local targetGroupName = %q
+
+if not coalition or type(coalition.getGroups) ~= "function" then
+    return "ERR:coalition_api", 1
+end
+
+local targetUnit = nil
+local targetGroup = nil
+
+for coalitionId = 0, 2 do
+    local groups = coalition.getGroups(coalitionId)
+    if groups then
+        for _, group in ipairs(groups) do
+            if group and group:getName() == targetGroupName then
+                targetGroup = group
+                local units = group:getUnits()
+                if units then
+                    for _, u in ipairs(units) do
+                        if u and u:getName() == targetUnitName then
+                            targetUnit = u
+                            break
+                        end
+                    end
+                end
+                break
+            end
+        end
+    end
+    if targetGroup then break end
+end
+
+if not targetGroup then
+    return "ERR:group_not_found", 1
+end
+
+if not targetUnit then
+    return "ERR:unit_not_found", 1
+end
+
+if type(targetUnit.destroy) == "function" then
+    targetUnit:destroy()
+    return "OK:unit_deleted", 1
+end
+
+if type(targetGroup.destroy) == "function" then
+    targetGroup:destroy()
+    return "OK:group_deleted", 1
+end
+
+return "ERR:delete_failed", 1
+]], unitName, groupName)
+
+    local result = bridge.execInEnv("mission", wrapMissionScript(innerCode))
+    if type(result) == "string" and result:match("^OK:") then
+        self:removeTrackedUnit(groupName, unitName)
+        if self.draggingUnit then
+            self:cancelDrag()
+        end
+        self:selectUnit(nil)
+        if self.hoverMarker then
+            self.hoverMarker:setVisible(false)
+        end
+        if self.selectedMarker then
+            self.selectedMarker:setVisible(false)
+        end
+        self:setStatusText(string.format("Deleted unit: %s", tostring(unitName)))
+        log.write('AccMod', log.INFO, string.format("UnitPlacer deleteSelectedUnit SUCCESS for %s (%s)", tostring(unitName), tostring(groupName)))
+        return true
+    end
+
+    local errText = tostring(result or "unknown")
+    self:setStatusText("Delete failed: " .. errText)
+    log.write('AccMod', log.ERROR, string.format("UnitPlacer deleteSelectedUnit FAILED for %s (%s): %s", tostring(unitName), tostring(groupName), errText))
+    return false
+end
+
+function UnitPlacerPanel:setArmed(armed)
+    if not self.window then
+        return false
+    end
+
+    if armed and AccModOverlayManager and AccModOverlayManager.vrModeEnabled == 2 then
+        self:setStatusText("Unit placer is disabled in VR LAYER mode")
+        return false
+    end
+
+    self.armed = armed == true
+
+    if self.armed then
+        self.hasBeenArmedOnce = true
+    end
+    
+    -- Keep overlay hidden until the first successful arm in this session.
+    local mode = _modes.full
+    if AccModOverlayManager and AccModOverlayManager.globalMode then
+        mode = AccModOverlayManager.globalMode
+    end
+
+    local shouldShow = self.hasBeenArmedOnce and mode ~= _modes.hidden
+    if shouldShow then
+        self.window:setVisible(true)
+        self.window:setHasCursor(true)
+        log.write('AccMod', log.INFO, string.format("UnitPlacer setArmed(%s): window visible (armedOnce=%s)", tostring(armed), tostring(self.hasBeenArmedOnce)))
+    else
+        self.window:setVisible(false)
+        self.window:setHasCursor(false)
+        if not self.hasBeenArmedOnce and mode ~= _modes.hidden then
+            log.write('AccMod', log.INFO, "UnitPlacer setArmed: visibility gated until first arm")
+        end
+    end
+
+    if not self.armed and self.clickMarker then
+        self.clickMarker:setVisible(false)
+        self.markerVisible = false
+    end
+
+    if self.armed then
+        self:setStatusText("Unit placer armed\nLeft click to place\nRight click to cancel")
+    else
+        self:setStatusText("Unit placer disarmed\nLeft click existing units to select/move")
+    end
+
+    self:syncManagerUi()
+
+    return true
+end
+
+function UnitPlacerPanel:update()
+    if not self.window then
+        return
+    end
+
+    -- Panel has never been armed this session; the overlay window is invisible
+    -- and there are no markers to maintain.  Skip all per-frame work.
+    if not self.hasBeenArmedOnce then
+        return
+    end
+
+    local screenW, screenH = Gui.GetWindowSize()
+    if screenW ~= self.windowWidth or screenH ~= self.windowHeight then
+        self.windowWidth = screenW
+        self.windowHeight = screenH
+        self.window:setBounds(0, 0, self.windowWidth, self.windowHeight)
+        self.panel:setBounds(0, 0, self.windowWidth, self.windowHeight)
+    end
+
+    if self.clickMarker and self.markerVisible and (os.clock() - self.lastMarkerTime) > self.markerDuration then
+        self.clickMarker:setVisible(false)
+        self.markerVisible = false
+    end
+    
+    -- Update selected marker position every frame
+    if self.selectedUnit then
+        self:updateSelectedMarker()
+    end
+    
+end
+
+function UnitPlacerPanel:closeWindow()
+    if self.window then
+        self.window:setVisible(false)
+        self.window = nil
+    end
+end
+
+function UnitPlacerPanel:setMode(mode)
+    if not self.window then
+        return
+    end
+
+    local visible = mode ~= _modes.hidden and self.hasBeenArmedOnce
+    self.window:setVisible(visible)
+    self.window:setHasCursor(visible)
+
+    if mode ~= _modes.hidden and not self.hasBeenArmedOnce then
+        log.write('AccMod', log.INFO, "UnitPlacerPanel mode change ignored until first arm")
+    end
+    
+    -- Hide unit highlighter when placer is active to prevent click interference
+    if AccModOverlayManager and AccModOverlayManager.unitHighlightPanel then
+        local highlighter = AccModOverlayManager.unitHighlightPanel
+        if highlighter.window then
+            if visible then
+                -- Placer is active: hide highlighter
+                highlighter.window:setVisible(false)
+                log.write('AccMod', log.INFO, "UnitPlacerPanel active: hiding unit highlighter to prevent click interference")
+            else
+                -- Placer is hidden: restore highlighter visibility based on render mode
+                local vrMode = AccModOverlayManager.vrModeEnabled or 0
+                local shouldShow = true
+                if vrMode == 2 then
+                    shouldShow = (highlighter.openxrLayerRenderMode or LAYER_RENDER_MODE_DOTS_LABELS_CLOSEST_RING) ~= LAYER_RENDER_MODE_NOTHING
+                else
+                    shouldShow = normalizeWindowRenderMode(highlighter.windowRenderMode or WINDOW_RENDER_MODE_DOTS_ONLY) ~= WINDOW_RENDER_MODE_OFF
+                end
+                highlighter.window:setVisible(shouldShow)
+                log.write('AccMod', log.INFO, "UnitPlacerPanel hidden: restoring unit highlighter visibility=" .. tostring(shouldShow))
+            end
+        end
     end
 end
 
@@ -3773,15 +7185,17 @@ AccModOverlayManager = {
     windows = {},
     first = true,
     managerWindow = nil, -- new GUI for creating/removing panels
+    managerWindowCreated = false, -- Track if window has ever been created (for close detection)
     managerConfig = nil,
-    managerWindowWidth = 320,
-    managerWindowHeight = 330,
+    managerWindowWidth = 400,
+    managerWindowHeight = 520,
     globalMode = "hidden", -- global mode for all panels
     panelsEnabled = true,
     windowRenderMode = WINDOW_RENDER_MODE_DOTS_ONLY,
     layerRenderMode = LAYER_RENDER_MODE_DOTS_LABELS_CLOSEST_RING,
     pdlImagePanel = nil, -- Active PDL image panel for continuous monitoring
     unitHighlightPanel = nil, -- Active unit highlighter panel
+    unitPlacerPanel = nil, -- Active unit placer panel
     debugInfoPanel = nil, -- Active debug info panel
     lastTankerCheckTime = 0, -- Track when we last checked for tankers
     autoShowEnabled = true, -- Enable automatic panel display on precontact
@@ -3796,20 +7210,175 @@ AccModOverlayManager = {
     openxrUDP = nil, -- UDP socket for sending to OpenXR layer (port 7779)
     openxrLayerAvailable = nil, -- nil=unchecked, true=available, false=unavailable
     openxrLastCheckTime = 0, -- Last time we checked for OpenXR layer
-    openxrStatusWidget = nil -- Status display widget
+    openxrStatusWidget = nil, -- Status display widget
+    unitPlacerArmButtonWidget = nil,
+    unitPlacerPresetButtonWidget = nil,
+    unitPlacerCoalitionButtonWidget = nil,
+    unitPlacerStatusWidget = nil,
+    keybindStatusWidget = nil,
+    keybindWidgets = nil,
 }
+
+function AccModOverlayManager:ensureUnitPlacerConfig()
+    self.managerConfig = self.managerConfig or {}
+    self.managerConfig.unitPlacer = UnitPlacerPanel.normalizeConfig(self.managerConfig.unitPlacer or {})
+
+    local config = self.managerConfig.unitPlacer
+    if self.unitPlacerPanel then
+        self.unitPlacerPanel:applyConfig(config)
+    end
+
+    return config
+end
+
+function AccModOverlayManager:ensureUnitPlacerPanel()
+    if self.unitPlacerPanel and self.unitPlacerPanel.window then
+        return self.unitPlacerPanel
+    end
+
+    local placerPanel = UnitPlacerPanel.new(self)
+    placerPanel:createWindow()
+    placerPanel:applyConfig(self:ensureUnitPlacerConfig())
+    placerPanel:loadAddedUnitsSnapshot(self.managerConfig and self.managerConfig.unitPlacerAddedUnits)
+    self.unitPlacerPanel = placerPanel
+    return placerPanel
+end
+
+function AccModOverlayManager:updateUnitPlacerStatus(statusText)
+    local config = self:ensureUnitPlacerConfig()
+    config.lastStatus = statusText or ""
+
+    if self.unitPlacerPanel and self.unitPlacerPanel.window then
+        self.unitPlacerPanel:applyConfig(config)
+        self.unitPlacerPanel:setStatusText(config.lastStatus)
+    elseif self.unitPlacerStatusWidget then
+        self.unitPlacerStatusWidget:setText(config.lastStatus)
+    end
+
+    self:saveConfiguration()
+end
+
+function AccModOverlayManager:syncUnitPlacerUi()
+    local config = self:ensureUnitPlacerConfig()
+    if self.unitPlacerPanel then
+        self.unitPlacerPanel:applyConfig(config)
+        self.unitPlacerPanel:syncManagerUi()
+        return
+    end
+
+    if self.unitPlacerArmButtonWidget then
+        self.unitPlacerArmButtonWidget:setText("Arm Placer")
+    end
+
+    if self.unitPlacerPresetButtonWidget then
+        local preset = UnitPlacerPanel.PRESETS[config.selectedPreset]
+        self.unitPlacerPresetButtonWidget:setText("Preset: " .. tostring((preset and preset.displayName) or config.selectedPreset))
+    end
+
+    if self.unitPlacerCoalitionButtonWidget then
+        self.unitPlacerCoalitionButtonWidget:setText("Side: " .. tostring(UnitPlacerPanel.SIDE_OPTIONS[config.coalitionSide].label))
+    end
+
+    if self.unitPlacerStatusWidget then
+        self.unitPlacerStatusWidget:setText(config.lastStatus or "")
+    end
+end
+
+function AccModOverlayManager:refreshJoystickDeviceList()
+    self.joystickDevices = {
+        { guid = "*", displayName = "Any Device" },
+    }
+
+    if not AccJoyBridge or type(AccJoyBridge.listDevices) ~= "function" then
+        return self.joystickDevices
+    end
+
+    local ok, payload = pcall(AccJoyBridge.listDevices)
+    if not ok or type(payload) ~= "string" then
+        return self.joystickDevices
+    end
+
+    for line in payload:gmatch("[^\n]+") do
+        local index, guid, instanceName, productName = line:match("^(%d+)\t([^\t]*)\t([^\t]*)\t(.*)$")
+        if index and guid and guid ~= "" then
+            local display = instanceName
+            if display == nil or display == "" then
+                display = productName
+            end
+            if display == nil or display == "" then
+                display = guid
+            end
+            table.insert(self.joystickDevices, {
+                guid = guid,
+                displayName = display,
+            })
+        end
+    end
+
+    return self.joystickDevices
+end
+
+function AccModOverlayManager:syncKeybindUi()
+    if not self.keybindWidgets or not self.managerConfig then
+        return
+    end
+
+    self.managerConfig.keybinds = normalizeKeybindConfig(self.managerConfig.keybinds)
+    self:refreshJoystickDeviceList()
+
+    for actionName, widgets in pairs(self.keybindWidgets) do
+        local binding = self.managerConfig.keybinds[actionName] or {}
+        local joy = binding.joystick or {}
+
+        if widgets.keyboardCombo then
+            widgets.keyboardCombo:setText(binding.keyboard or "NONE")
+        end
+
+        if widgets.deviceCombo then
+            widgets.deviceCombo:clear()
+            local targetGuid = tostring(joy.deviceGuid or "*")
+            local selectedLabel = "Any Device"
+            for _, info in ipairs(self.joystickDevices or {}) do
+                local label = string.format("%s (%s)", tostring(info.displayName), tostring(info.guid))
+                widgets.deviceCombo:newItem(label)
+                if tostring(info.guid) == targetGuid then
+                    selectedLabel = label
+                end
+            end
+            widgets.deviceCombo:setText(selectedLabel)
+        end
+
+        if widgets.buttonCombo then
+            local buttonId = tonumber(joy.buttonId) or -1
+            if buttonId < 0 then
+                widgets.buttonCombo:setText("NONE")
+            else
+                widgets.buttonCombo:setText("BTN_" .. tostring(buttonId))
+            end
+        end
+    end
+
+    if self.keybindStatusWidget then
+        self.keybindStatusWidget:setText("Keybinds loaded")
+    end
+end
 
 function AccModOverlayManager:loadConfiguration()
     local tbl = Tools.safeDoFile(lfs.writedir() .. 'Config\\AccModManager.lua', false)
     if tbl and tbl.config then
         self.managerConfig = tbl.config
+        if type(self.managerConfig.unitPlacerAddedUnits) ~= "table" then
+            self.managerConfig.unitPlacerAddedUnits = {}
+        end
         if not self.managerConfig.selectedTab then
             self.managerConfig.selectedTab = "accessibility"
         end
         if self.managerConfig.panelsEnabled == nil then
             self.managerConfig.panelsEnabled = true
         end
+        self.managerConfig.keybinds = normalizeKeybindConfig(self.managerConfig.keybinds)
         self.panelsEnabled = self.managerConfig.panelsEnabled
+        self:ensureUnitPlacerConfig()
         -- Load global mode from manager config
         if tbl.config.globalMode then
             self.globalMode = tbl.config.globalMode
@@ -3844,11 +7413,21 @@ function AccModOverlayManager:loadConfiguration()
             globalMode = "visible",
             selectedTab = "accessibility",
             panelsEnabled = true,
-            panels = {}
+            panels = {},
+            unitPlacerAddedUnits = {},
+            unitPlacer = {
+                selectedPreset = UnitPlacerPanel.DEFAULT_PRESET_NAME,
+                coalitionSide = "blue",
+                maxDistance = 500,
+                headingMode = "face_player",
+                lastStatus = "Idle",
+            },
+            keybinds = cloneDefaultKeybinds(),
         }
     
         self.globalMode = "visible"
         self.panelsEnabled = true
+        self:ensureUnitPlacerConfig()
 
         self:saveConfiguration()
     end
@@ -3859,6 +7438,16 @@ function AccModOverlayManager:saveConfiguration()
         self.managerConfig.globalMode = self.globalMode
         self.managerConfig.selectedTab = self.managerConfig.selectedTab or "accessibility"
         self.managerConfig.panelsEnabled = self.panelsEnabled
+        self.managerConfig.keybinds = normalizeKeybindConfig(self.managerConfig.keybinds)
+        if self.unitPlacerPanel then
+            self.managerConfig.unitPlacer = self.unitPlacerPanel:exportConfigState()
+            self.managerConfig.unitPlacerAddedUnits = self.unitPlacerPanel:exportAddedUnitsSnapshot()
+        else
+            self:ensureUnitPlacerConfig()
+            if type(self.managerConfig.unitPlacerAddedUnits) ~= "table" then
+                self.managerConfig.unitPlacerAddedUnits = {}
+            end
+        end
         
         -- Save panel list (just filenames - individual configs have all the details)
         self.managerConfig.panels = {}
@@ -3930,25 +7519,35 @@ function AccModOverlayManager:createManagerWindow()
     local panelTabs = box.panelTabs
     local accessibilityPanel = box.panelAccessibility
     local labelsPanel = box.panelLabels
+    local keybindsPanel = box.panelKeybinds
     local toolsPanel = box.panelTools
+    local unitPlacerPanel = box.panelUnitPlacer
     local tabAccessibility = panelTabs.tabAccessibility
     local tabLabels = panelTabs.tabLabels
+    local tabKeybinds = panelTabs.tabKeybinds
     local tabTools = panelTabs.tabTools
+    local tabUnitPlacer = panelTabs.tabUnitPlacer
 
     local managerTabs = {
         accessibility = { tab = tabAccessibility, panel = accessibilityPanel },
         tools = { tab = tabTools, panel = toolsPanel },
         labels = { tab = tabLabels, panel = labelsPanel },
+        keybinds = { tab = tabKeybinds, panel = keybindsPanel },
+        unitplacer = { tab = tabUnitPlacer, panel = unitPlacerPanel },
     }
     local isSwitchingManagerTab = false
     local managerInstance = self
 
-    tabAccessibility:setBounds(0, 0, 98, 24)
-    tabTools:setBounds(100, 0, 98, 24)
-    tabLabels:setBounds(200, 0, 98, 24)
-    accessibilityPanel:setBounds(10, 40, 300, 238)
-    toolsPanel:setBounds(10, 40, 300, 238)
-    labelsPanel:setBounds(10, 40, 300, 238)
+    tabAccessibility:setBounds(0, 0, 76, 24)
+    tabTools:setBounds(76, 0, 76, 24)
+    tabLabels:setBounds(152, 0, 76, 24)
+    tabKeybinds:setBounds(228, 0, 76, 24)
+    tabUnitPlacer:setBounds(304, 0, 76, 24)
+    accessibilityPanel:setBounds(10, 40, 380, 238)
+    toolsPanel:setBounds(10, 40, 380, 238)
+    labelsPanel:setBounds(10, 40, 380, 238)
+    keybindsPanel:setBounds(10, 40, 380, 238)
+    unitPlacerPanel:setBounds(10, 40, 380, 450)
 
     local function selectManagerTab(selectedName)
         if isSwitchingManagerTab then
@@ -4002,6 +7601,27 @@ function AccModOverlayManager:createManagerWindow()
         end)
     end
 
+    -- Defer all unit placer loading and window creation until the user first opens
+    -- the Unit Placer tab.  This way a typical game session incurs zero overhead:
+    -- no transparent overlay window, no catalog dofile(), no per-frame update work.
+    do
+        local _upHostPanel  = unitPlacerPanel
+        local _upSkinSource = pNoVisible.eWhiteText
+        local _baseOnShow   = tabUnitPlacer.onShow
+        function tabUnitPlacer:onShow()
+            _baseOnShow(self)
+            managerInstance:ensureUnitPlacerPanel():attachManagerTab(_upHostPanel, _upSkinSource)
+        end
+    end
+
+    do
+        local _baseOnShow = tabKeybinds.onShow
+        function tabKeybinds:onShow()
+            _baseOnShow(self)
+            managerInstance:syncKeybindUi()
+        end
+    end
+
     local winWidth, winHeight = self.managerWindowWidth, self.managerWindowHeight
     box:setBounds(0, 0, winWidth, winHeight)
     self.managerWindow:setHasCursor(true)
@@ -4024,6 +7644,9 @@ function AccModOverlayManager:createManagerWindow()
 		self.managerWindow:setBounds(-10000, -10000, winWidth, winHeight)
 	end
 	self.managerWindow:setVisible(true)  -- Always visible to receive hotkeys
+	
+	-- Store window tracking flag for close detection
+	self.managerWindowCreated = true
 
     if not self.managerConfig.selectedTab or not managerTabs[self.managerConfig.selectedTab] then
         self.managerConfig.selectedTab = "accessibility"
@@ -4052,7 +7675,7 @@ function AccModOverlayManager:createManagerWindow()
     -- Add hotkey display text
     local hotkeyText = Static.new()
     accessibilityPanel:insertWidget(hotkeyText)
-    hotkeyText:setBounds(10, 40, 300, 20)
+    hotkeyText:setBounds(10, 40, 380, 20)
     hotkeyText:setText("Show/Transparent/Hide Shortcut: Ctrl+Shift+1")
     local textSkin = pNoVisible.eWhiteText:getSkin()
     textSkin.skinData.states.released[1].text.fontSize = 12
@@ -4087,7 +7710,7 @@ function AccModOverlayManager:createManagerWindow()
     -- Remove Panel button
     local btnRemove = Button.new("Remove Panel")
     accessibilityPanel:insertWidget(btnRemove)
-    btnRemove:setBounds(160, 70, 140, 28)
+    btnRemove:setBounds(160, 70, 230, 28)
     btnRemove:addChangeCallback(function()
         -- get selected index and remove the panel (ComboList uses 1-based indexing)
         local item = managerInstance.listOverlays:getSelectedItem()
@@ -4113,13 +7736,97 @@ function AccModOverlayManager:createManagerWindow()
 
     local btnPanelsEnabled = Button.new(self.panelsEnabled and "Panels: Enabled" or "Panels: Disabled")
     accessibilityPanel:insertWidget(btnPanelsEnabled)
-    btnPanelsEnabled:setBounds(10, 110, 290, 28)
+    btnPanelsEnabled:setBounds(10, 110, 380, 28)
     btnPanelsEnabled:addChangeCallback(function()
         managerInstance.panelsEnabled = (managerInstance.panelsEnabled == false)
         btnPanelsEnabled:setText(managerInstance.panelsEnabled and "Panels: Enabled" or "Panels: Disabled")
         managerInstance:applyManagedPanelsMode()
         managerInstance:saveConfiguration()
     end)
+
+    self.keybindWidgets = {}
+    local keybindHeader = Static.new()
+    keybindsPanel:insertWidget(keybindHeader)
+    keybindHeader:setBounds(10, 10, 360, 20)
+    keybindHeader:setText("Set keyboard and joystick buttons per action")
+    local keybindHeaderSkin = pNoVisible.eWhiteText:getSkin()
+    keybindHeaderSkin.skinData.states.released[1].text.fontSize = 12
+    keybindHeader:setSkin(keybindHeaderSkin)
+
+    local keybindStatus = Static.new()
+    keybindsPanel:insertWidget(keybindStatus)
+    keybindStatus:setBounds(10, 210, 360, 20)
+    keybindStatus:setText("Ready")
+    keybindStatus:setSkin(keybindHeaderSkin)
+    self.keybindStatusWidget = keybindStatus
+
+    local function buildActionRow(actionName, y)
+        local label = Static.new()
+        keybindsPanel:insertWidget(label)
+        label:setBounds(10, y, 360, 18)
+        label:setText(KEYBIND_ACTIONS[actionName] or actionName)
+        label:setSkin(keybindHeaderSkin)
+
+        local keyboardCombo = ComboList.new()
+        keybindsPanel:insertWidget(keyboardCombo)
+        keyboardCombo:setBounds(10, y + 18, 120, 22)
+        for _, combo in ipairs(SUPPORTED_KEYBOARD_BINDS) do
+            keyboardCombo:newItem(combo)
+        end
+
+        local deviceCombo = ComboList.new()
+        keybindsPanel:insertWidget(deviceCombo)
+        deviceCombo:setBounds(140, y + 18, 160, 22)
+
+        local buttonCombo = ComboList.new()
+        keybindsPanel:insertWidget(buttonCombo)
+        buttonCombo:setBounds(310, y + 18, 70, 22)
+        buttonCombo:newItem("NONE")
+        for i = 0, 63 do
+            buttonCombo:newItem("BTN_" .. tostring(i))
+        end
+
+        keyboardCombo.onChange = function(_, item)
+            local selected = item and item:getText() or "NONE"
+            managerInstance.managerConfig.keybinds = normalizeKeybindConfig(managerInstance.managerConfig.keybinds)
+            managerInstance.managerConfig.keybinds[actionName].keyboard = selected
+            managerInstance:saveConfiguration()
+            if managerInstance.keybindStatusWidget then
+                managerInstance.keybindStatusWidget:setText((KEYBIND_ACTIONS[actionName] or actionName) .. " keyboard: " .. selected)
+            end
+        end
+
+        deviceCombo.onChange = function(_, item)
+            local selected = item and item:getText() or "Any Device (*)"
+            local guid = selected:match("%(([^)]+)%)$") or "*"
+            managerInstance.managerConfig.keybinds = normalizeKeybindConfig(managerInstance.managerConfig.keybinds)
+            managerInstance.managerConfig.keybinds[actionName].joystick.deviceGuid = guid
+            managerInstance:saveConfiguration()
+            if managerInstance.keybindStatusWidget then
+                managerInstance.keybindStatusWidget:setText((KEYBIND_ACTIONS[actionName] or actionName) .. " device: " .. guid)
+            end
+        end
+
+        buttonCombo.onChange = function(_, item)
+            local selected = item and item:getText() or "NONE"
+            local btnId = tonumber(selected:match("BTN_(%d+)")) or -1
+            managerInstance.managerConfig.keybinds = normalizeKeybindConfig(managerInstance.managerConfig.keybinds)
+            managerInstance.managerConfig.keybinds[actionName].joystick.buttonId = btnId
+            managerInstance:saveConfiguration()
+            if managerInstance.keybindStatusWidget then
+                managerInstance.keybindStatusWidget:setText((KEYBIND_ACTIONS[actionName] or actionName) .. " button: " .. selected)
+            end
+        end
+
+        self.keybindWidgets[actionName] = {
+            keyboardCombo = keyboardCombo,
+            deviceCombo = deviceCombo,
+            buttonCombo = buttonCombo,
+        }
+    end
+
+    buildActionRow("switchLabelMode", 40)
+    buildActionRow("toggleVrMode", 110)
 
     -- Show Image button
     local btnShowImage = Button.new("A2A Refuel PDL")
@@ -4214,13 +7921,13 @@ function AccModOverlayManager:createManagerWindow()
 
     local btnReloadTools = Button.new("Reload All Windows")
     toolsPanel:insertWidget(btnReloadTools)
-    btnReloadTools:setBounds(10, 80, 290, 28)
+    btnReloadTools:setBounds(10, 80, 380, 28)
     btnReloadTools:addChangeCallback(reloadAllWindows)
 
-    -- Reload All button
+    -- Reload All button (positioned below unit placer dial area)
     local btnReload = Button.new("Reload All Windows")
     box:insertWidget(btnReload)
-    btnReload:setBounds(10, 288, 300, 28)
+    btnReload:setBounds(10, 440, 380, 28)
     btnReload:addChangeCallback(reloadAllWindows)
 
     -- FOV display and adjustment controls
@@ -4258,7 +7965,7 @@ function AccModOverlayManager:createManagerWindow()
     -- OpenXR Layer status display
     local openxrStatusText = Static.new()
     labelsPanel:insertWidget(openxrStatusText)
-    openxrStatusText:setBounds(10, 125, 290, 18)
+    openxrStatusText:setBounds(10, 125, 380, 18)
     openxrStatusText:setText("OpenXR Layer: Checking...")
     local statusSkin = pNoVisible.eWhiteText:getSkin()
     statusSkin.skinData.states.released[1].text.fontSize = 12
@@ -4287,89 +7994,21 @@ function AccModOverlayManager:createManagerWindow()
     btnVRMode:setBounds(10, 155, 140, 28)
     btnVRMode:setVisible(true)
     btnVRMode:addChangeCallback(function()
-        -- Check OpenXR layer availability on first toggle
-        if managerInstance.openxrLayerAvailable == nil then
-            managerInstance:checkOpenXRLayerAvailable()
-            -- Update status display
-            if managerInstance.openxrStatusWidget then
-                if managerInstance.openxrLayerAvailable == true then
-                    managerInstance.openxrStatusWidget:setText("OpenXR Layer: Available (LAYER mode enabled)")
-                elseif managerInstance.openxrLayerAvailable == false then
-                    managerInstance.openxrStatusWidget:setText("OpenXR Layer: Not detected (Window overlay enabled)")
-                else
-                    managerInstance.openxrStatusWidget:setText("OpenXR Layer: Unknown status")
-                end
-            end
-        end
-        
-        -- Cycle to next available mode
-        local startMode = managerInstance.vrModeEnabled
-        local attempts = 0
-        
-        repeat
-            managerInstance.vrModeEnabled = (managerInstance.vrModeEnabled + 1) % 3
-            attempts = attempts + 1
-            
-            -- Skip mode 1 (window overlay) if OpenXR layer is available
-            -- Skip mode 2 (LAYER) if OpenXR layer is NOT available
-            if managerInstance.vrModeEnabled == 1 and managerInstance.openxrLayerAvailable == true then
-                -- Layer is available, skip window overlay mode
-                managerInstance.vrModeEnabled = (managerInstance.vrModeEnabled + 1) % 3
-            elseif managerInstance.vrModeEnabled == 2 and managerInstance.openxrLayerAvailable == false then
-                -- Layer not available, skip LAYER mode
-                managerInstance.vrModeEnabled = (managerInstance.vrModeEnabled + 1) % 3
-            end
-            
-        until managerInstance.vrModeEnabled ~= startMode or attempts > 3
-        
-        -- Clear OpenXR circles when switching modes
-        if managerInstance.openxrUDP then
-            managerInstance.openxrUDP:sendto("A", "127.0.0.1", 7779)
-            log.write('AccMod', log.INFO, "Cleared OpenXR circles on mode switch")
-        end
-        
-        if managerInstance.vrModeEnabled == 0 then
-            -- VR OFF
-            btnVRMode:setText("VR Mode: OFF")
-            btnVRReset:setVisible(false)  -- Hide reset button when VR is off
-            log.write('AccMod', log.INFO, "VR Mode: OFF")
-        elseif managerInstance.vrModeEnabled == 1 then
-            -- VR ON (window overlay) - only available if layer is NOT present
-            managerInstance:captureVRReference()
-            btnVRReset:setVisible(true)  -- Show reset button when VR is active
-            if managerInstance.openxrLayerAvailable == false then
-                btnVRMode:setText("VR Mode: ON")
-                log.write('AccMod', log.INFO, "VR Mode: ON (window overlay - no OpenXR layer)")
-            else
-                btnVRMode:setText("VR Mode: ON (overlay)")
-                log.write('AccMod', log.INFO, "VR Mode: ON (window overlay)")
-            end
-        elseif managerInstance.vrModeEnabled == 2 then
-            -- VR ON LAYER (OpenXR layer) - only available if layer IS present
-            managerInstance:captureVRReference()
-            btnVRReset:setVisible(false)  -- Hide reset button in LAYER mode (not needed for head-locked overlay)
-            -- Initialize OpenXR UDP socket if not already created
-            if not managerInstance.openxrUDP then
-                managerInstance.openxrUDP = socket.udp()
-                managerInstance.openxrUDP:settimeout(0)
-                log.write('AccMod', log.INFO, "OpenXR UDP socket created")
-            end
-            if managerInstance.openxrLayerAvailable == true then
-                btnVRMode:setText("VR Mode: LAYER")
-                log.write('AccMod', log.INFO, "VR Mode: ON LAYER (OpenXR layer active)")
-            else
-                btnVRMode:setText("VR Mode: LAYER (?)")
-                log.write('AccMod', log.WARNING, "VR Mode: LAYER selected but OpenXR layer status unknown")
-            end
-        end
-
-        ensureUnitHighlightPanelForMode()
-        syncManagerRenderModeUi()
+        performVrModeToggle(managerInstance, btnVRMode, btnVRReset)
     end)
     self.vrButtonWidget = btnVRMode
 
     -- Register hotkey on manager window so it works even when panels are hidden
     self.managerWindow:addHotKeyCallback("Ctrl+Shift+1", AccModOverlayManager.onHotKey)
+
+    for _, combo in ipairs(SUPPORTED_KEYBOARD_BINDS) do
+        if combo ~= "NONE" then
+            local keyCombo = combo
+            self.managerWindow:addHotKeyCallback(keyCombo, function()
+                dispatchKeyboardBinding(keyCombo)
+            end)
+        end
+    end
     
     -- Register FOV adjustment hotkeys
     self.managerWindow:addHotKeyCallback("Ctrl+Shift+2", function()
@@ -4402,6 +8041,8 @@ function AccModOverlayManager:createManagerWindow()
 
     ensureUnitHighlightPanelForMode()
     syncManagerRenderModeUi()
+    self:syncUnitPlacerUi()
+    self:syncKeybindUi()
 end
 
 -- Check if OpenXR layer is available
@@ -4536,8 +8177,8 @@ end
     
     log.write('AccMod', log.INFO, "Executing mission code to get draw arguments")
     
-    local result, success = bridge.execInEnv("mission", missionCode)
-    
+    local success, result = pcall(bridge.execInEnv, "mission", missionCode)
+
     if not success then
         return nil, nil, "Bridge execution failed"
     end
@@ -4623,6 +8264,12 @@ function AccModOverlayManager:destroyAllWindows()
     if self.unitHighlightPanel and self.unitHighlightPanel.window then
         self.unitHighlightPanel:closeWindow()
         self.unitHighlightPanel = nil
+    end
+
+    -- Close unit placer panel if exists
+    if self.unitPlacerPanel and self.unitPlacerPanel.window then
+        self.unitPlacerPanel:closeWindow()
+        self.unitPlacerPanel = nil
     end
     
     -- Close debug info panel if exists
@@ -4864,6 +8511,10 @@ function AccModOverlayManager.onHotKey()
             AccModOverlayManager.unitHighlightPanel:setMode(_modes.full)
 		end
 
+        if AccModOverlayManager.unitPlacerPanel and AccModOverlayManager.unitPlacerPanel.window then
+            AccModOverlayManager.unitPlacerPanel:setMode(AccModOverlayManager.globalMode)
+        end
+
         -- show manager window only when global mode is full
         if AccModOverlayManager.managerWindow then
             local shouldShow = (AccModOverlayManager.globalMode == _modes.full)
@@ -4881,6 +8532,12 @@ function AccModOverlayManager.onHotKey()
 end
 function AccModOverlayManager.onSimulationFrame()
     ensureUnitHighlightPanelForMode()
+	
+	-- Check if manager window was closed by user (clicking X button) and recreate it
+	if AccModOverlayManager.managerWindowCreated and not AccModOverlayManager.managerWindow then
+		log.write('AccMod', log.WARNING, "Manager window was closed by user, recreating...")
+		AccModOverlayManager:createManagerWindow()
+	end
 
 	for _i,_s in pairs(AccModOverlayManager.windows) do
 		_s._last = _s._last or 0
@@ -4989,6 +8646,10 @@ function AccModOverlayManager.onSimulationFrame()
 	if AccModOverlayManager.unitHighlightPanel and AccModOverlayManager.unitHighlightPanel.window then
 		AccModOverlayManager.unitHighlightPanel:update()
 	end
+
+        if AccModOverlayManager.unitPlacerPanel and AccModOverlayManager.unitPlacerPanel.window then
+            AccModOverlayManager.unitPlacerPanel:update()
+        end
 	
 	-- Update Debug Info panel if active
 	if AccModOverlayManager.debugInfoPanel and AccModOverlayManager.debugInfoPanel.window then
@@ -5012,49 +8673,70 @@ DCS.setUserCallbacks(AccModOverlayManager)
 net.log("Loaded - AccMod")
 
 function JankyJoy:onSimulationFrame()
+    ensureAccJoyBridgeRunning()
+
     if not ensureJoystickUdpSocket(false) then
         return
     end
 
     local msg = udp:receive()
-    if msg == nil then
-        return
-    end
-    msg2 = udp:receive()
-    while msg2 ~= nil do
-        msg = msg2
-        msg2 = udp:receive()
-    end     
+    while msg ~= nil do
+        local deviceGuid = nil
+        local buttonNumeric = nil
+        local buttonId = nil
+        local eventState = nil
 
-    local buttonId, eventState = msg:match("^(BTN_%d+)_(%u+)$")
-    if buttonId and (eventState == "PRESSED" or eventState == "RELEASED") then
-        setJankyJoyButtonState(buttonId, eventState == "PRESSED")
-        fireJoyButtonEvent(buttonId, eventState, msg)
-    end
-
-    local axis, value = msg:match("AXIS_(%d+)_([%-%.%d]+)")
-    if base.tonumber(axis) == 2 then
-        JankyJoy.currentZoomAxis = base.tonumber(value)
-        local function calcY(x)
-            return 32.2624 * math.exp(0.9241 * x) - 6.1548
+        deviceGuid, buttonNumeric, eventState = msg:match("^JOY_([^_]+)_BTN_(%d+)_(%u+)$")
+        if buttonNumeric and (eventState == "PRESSED" or eventState == "RELEASED") then
+            buttonId = "BTN_" .. tostring(buttonNumeric)
+        else
+            local legacyButton
+            legacyButton, eventState = msg:match("^(BTN_%d+)_(%u+)$")
+            if legacyButton and (eventState == "PRESSED" or eventState == "RELEASED") then
+                buttonId = legacyButton
+                buttonNumeric = legacyButton:match("BTN_(%d+)")
+                deviceGuid = "*"
+            end
         end
 
-        -- Only update FOV from the axis when the zoom button is NOT held.
-        -- While the button is held, manualFOVOffset is frozen at the calibrated
-        -- zoom value to keep dots anchored. Axis messages keep arriving from the
-        -- bridge even during button hold, which previously caused projection thrash.
-        if not JankyJoy.zoomButtonOn then
-            manualFOVOffset = calcY(base.tonumber(value))
+        if buttonId and buttonNumeric then
+            setJankyJoyButtonState(buttonId, eventState == "PRESSED", deviceGuid)
+            local consumed = dispatchJoystickBinding(deviceGuid or "*", tonumber(buttonNumeric), eventState)
+            if not consumed then
+                fireJoyButtonEvent(buttonId, eventState, msg)
+            end
         end
 
+        local axis, value = msg:match("AXIS_(%d+)_([%-%.%d]+)")
+        if not axis then
+            local _dev, devAxis, devValue = msg:match("^JOY_([^_]+)_AXIS_(%d+)_([%-%.%d]+)$")
+            axis = devAxis
+            value = devValue
+        end
+
+        if base.tonumber(axis) == 2 then
+            JankyJoy.currentZoomAxis = base.tonumber(value)
+            local function calcY(x)
+                return 32.2624 * math.exp(0.9241 * x) - 6.1548
+            end
+
+            if not JankyJoy.zoomButtonOn then
+                manualFOVOffset = calcY(base.tonumber(value))
+            end
+        end
+
+        msg = udp:receive()
     end
 end
 
--- Cleanup AccJoyBridge when simulation stops.
--- Leave the UDP socket open so the next mission load can reuse it immediately
--- without hitting a bind race against the OS port-release delay.
+-- Do NOT stop AccJoyBridge here. On mission reload DCS re-executes the script
+-- chunk first (initializeAccJoyBridge starts a fresh monitor), THEN fires
+-- onSimulationStop on the old chunk. Stopping here kills the already-running
+-- new monitor and causes the "works on first load, dead on reload" bug.
+-- The native DLL cleans up in DLL_PROCESS_DETACH when DCS itself exits.
+-- The UDP socket is also left alive for the same bind-race reason.
 function JankyJoy:onSimulationStop()
-    cleanupAccJoyBridge()
+    log.write('AccMod', log.INFO, "AccJoyBridge: onSimulationStop - leaving bridge running for seamless reload")
 end
 
 DCS.setUserCallbacks(JankyJoy)

@@ -171,22 +171,6 @@ static void DrawText(uint8_t* pixels, int rowPitch, int W, int H, const char* te
     }
 }
 
-static void DrawTextWithHighlight(uint8_t* pixels, int rowPitch, int W, int H, const char* text,
-                                  int cx, int cy, uint8_t r, uint8_t g, uint8_t b,
-                                  float textAlpha, float highlightAlpha) {
-    if (!text || text[0] == '\0') return;
-
-    DrawText(pixels, rowPitch, W, H, text, cx - 1, cy - 1, 255, 255, 255, highlightAlpha);
-    DrawText(pixels, rowPitch, W, H, text, cx - 1, cy, 255, 255, 255, highlightAlpha);
-    DrawText(pixels, rowPitch, W, H, text, cx - 1, cy + 1, 255, 255, 255, highlightAlpha);
-    DrawText(pixels, rowPitch, W, H, text, cx + 1, cy, 255, 255, 255, highlightAlpha);
-    DrawText(pixels, rowPitch, W, H, text, cx + 1, cy - 1, 255, 255, 255, highlightAlpha);
-    DrawText(pixels, rowPitch, W, H, text, cx + 1, cy + 1, 255, 255, 255, highlightAlpha);
-    DrawText(pixels, rowPitch, W, H, text, cx, cy - 1, 255, 255, 255, highlightAlpha);
-    DrawText(pixels, rowPitch, W, H, text, cx, cy + 1, 255, 255, 255, highlightAlpha);
-    DrawText(pixels, rowPitch, W, H, text, cx, cy, r, g, b, textAlpha);
-}
-
 // Create swapchain for overlay rendering
 bool CreateOverlaySwapchain() {
     if (!g_renderState.session || g_renderState.textSwapchain != XR_NULL_HANDLE) {
@@ -515,14 +499,9 @@ void RenderTextToTexture() {
                     // Position text 10 pixels above the circle's top edge
                     int textX = (int)cx;
                     int textY = (int)(cy - r - 10);
-                    
-                    uint8_t labelR = (uint8_t)(circle.r * 255.0f);
-                    uint8_t labelG = (uint8_t)(circle.g * 255.0f);
-                    uint8_t labelB = (uint8_t)(circle.b * 255.0f);
 
-                    // Draw text in the same contact color with a subtle white highlight for contrast.
-                    DrawTextWithHighlight(pixels, rowPitch, W, H, circle.label, textX, textY,
-                                          labelR, labelG, labelB, 0.95f, 0.55f);
+                    DrawText(pixels, rowPitch, W, H, circle.label, textX, textY,
+                             255, 255, 255, circle.labelA);
                 }
 
                 g_renderState.context->Unmap(g_renderState.stagingTexture, 0);

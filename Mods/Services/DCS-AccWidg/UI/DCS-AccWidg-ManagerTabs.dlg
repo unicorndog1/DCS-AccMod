@@ -8,8 +8,8 @@ dialog = {
                             ["params"] = {
                                 ["bounds"] = {
                                     ["h"] = 24,
-                                    ["w"] = 98,
-                                    ["x"] = 200,
+                                    ["w"] = 76,
+                                    ["x"] = 0,
                                     ["y"] = 0,
                                 },
                                 ["enabled"] = true,
@@ -34,8 +34,8 @@ dialog = {
                             ["params"] = {
                                 ["bounds"] = {
                                     ["h"] = 24,
-                                    ["w"] = 98,
-                                    ["x"] = 0,
+                                    ["w"] = 76,
+                                    ["x"] = 152,
                                     ["y"] = 0,
                                 },
                                 ["enabled"] = true,
@@ -56,12 +56,38 @@ dialog = {
                             },
                             ["type"] = "TabGroupItem",
                         },
+                        ["tabKeybinds"] = {
+                            ["params"] = {
+                                ["bounds"] = {
+                                    ["h"] = 24,
+                                    ["w"] = 76,
+                                    ["x"] = 228,
+                                    ["y"] = 0,
+                                },
+                                ["enabled"] = true,
+                                ["state"] = false,
+                                ["text"] = "Keybinds",
+                                ["tooltip"] = "Keybinds",
+                                ["visible"] = true,
+                                ["zindex"] = 0,
+                            },
+                            ["skin"] = {
+                                ["params"] = {
+                                    ["minSize"] = {
+                                        ["horz"] = 90,
+                                        ["vert"] = 24,
+                                    },
+                                    ["name"] = "switchButton_ME",
+                                },
+                            },
+                            ["type"] = "TabGroupItem",
+                        },
                         ["tabTools"] = {
                             ["params"] = {
                                 ["bounds"] = {
                                     ["h"] = 24,
-                                    ["w"] = 98,
-                                    ["x"] = 100,
+                                    ["w"] = 76,
+                                    ["x"] = 76,
                                     ["y"] = 0,
                                 },
                                 ["enabled"] = true,
@@ -82,11 +108,37 @@ dialog = {
                             },
                             ["type"] = "TabGroupItem",
                         },
+                        ["tabUnitPlacer"] = {
+                            ["params"] = {
+                                ["bounds"] = {
+                                    ["h"] = 24,
+                                    ["w"] = 76,
+                                    ["x"] = 304,
+                                    ["y"] = 0,
+                                },
+                                ["enabled"] = true,
+                                ["state"] = false,
+                                ["text"] = "Placer",
+                                ["tooltip"] = "Unit Placer",
+                                ["visible"] = true,
+                                ["zindex"] = 0,
+                            },
+                            ["skin"] = {
+                                ["params"] = {
+                                    ["minSize"] = {
+                                        ["horz"] = 90,
+                                        ["vert"] = 24,
+                                    },
+                                    ["name"] = "switchButton_ME",
+                                },
+                            },
+                            ["type"] = "TabGroupItem",
+                        },
                     },
                     ["params"] = {
                         ["bounds"] = {
                             ["h"] = 28,
-                            ["w"] = 300,
+                            ["w"] = 380,
                             ["x"] = 10,
                             ["y"] = 8,
                         },
@@ -118,7 +170,7 @@ dialog = {
                     ["params"] = {
                         ["bounds"] = {
                             ["h"] = 280,
-                            ["w"] = 300,
+                            ["w"] = 380,
                             ["x"] = 10,
                             ["y"] = 40,
                         },
@@ -150,7 +202,39 @@ dialog = {
                     ["params"] = {
                         ["bounds"] = {
                             ["h"] = 280,
-                            ["w"] = 300,
+                            ["w"] = 380,
+                            ["x"] = 10,
+                            ["y"] = 40,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "",
+                        ["tooltip"] = "",
+                        ["visible"] = false,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000000",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+                ["panelKeybinds"] = {
+                    ["children"] = {
+                    },
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 280,
+                            ["w"] = 380,
                             ["x"] = 10,
                             ["y"] = 40,
                         },
@@ -182,7 +266,39 @@ dialog = {
                     ["params"] = {
                         ["bounds"] = {
                             ["h"] = 280,
-                            ["w"] = 300,
+                            ["w"] = 380,
+                            ["x"] = 10,
+                            ["y"] = 40,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "",
+                        ["tooltip"] = "",
+                        ["visible"] = false,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000000",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+                ["panelUnitPlacer"] = {
+                    ["children"] = {
+                    },
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 450,
+                            ["w"] = 380,
                             ["x"] = 10,
                             ["y"] = 40,
                         },
@@ -212,8 +328,8 @@ dialog = {
             ["params"] = {
                 ["bounds"] = {
                     [1] = {
-                        ["h"] = 330,
-                        ["w"] = 320,
+                        ["h"] = 520,
+                        ["w"] = 400,
                         ["x"] = 0,
                         ["y"] = 0,
                     },
@@ -422,8 +538,8 @@ dialog = {
     ["params"] = {
         ["bounds"] = {
             [1] = {
-                ["h"] = 330,
-                ["w"] = 320,
+                ["h"] = 520,
+                ["w"] = 400,
                 ["x"] = 0,
                 ["y"] = 0,
             },

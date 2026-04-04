@@ -48,3 +48,83 @@ if not status then
 else
     net.log("AccMod loaded successfully with bridge")
 end
+
+-- Set heading for a specific unit by name via mission environment.
+-- Returns a status string beginning with "OK" on success, otherwise "ERR:*".
+function AccModBridge.setUnitHeading(unitName, groupName, heading)
+    if not unitName or not groupName then
+        return "ERR:missing_unit_or_group", false
+    end
+
+    local numericHeading = tonumber(heading) or 0
+
+    local innerCode = string.format([[ 
+local unitName = %q
+local groupName = %q
+local newHeading = %.6f
+
+local function applyHeadingToPosition(pos, hdg)
+    local ch = math.cos(hdg)
+    local sh = math.sin(hdg)
+
+    pos.x = pos.x or {}
+    pos.y = pos.y or {}
+    pos.z = pos.z or {}
+
+    pos.x.x = ch
+    pos.x.y = 0
+    pos.x.z = sh
+
+    pos.y.x = 0
+    pos.y.y = 1
+    pos.y.z = 0
+
+    pos.z.x = -sh
+    pos.z.y = 0
+    pos.z.z = ch
+
+    return pos
+end
+
+if not coalition or type(coalition.getGroups) ~= "function" then
+    return "ERR:coalition_api", 1
+end
+
+for coalitionId = 0, 2 do
+    local groups = coalition.getGroups(coalitionId)
+    if groups then
+        for _, group in ipairs(groups) do
+            if group and group:getName() == groupName then
+                local units = group:getUnits()
+                if units then
+                    for _, u in ipairs(units) do
+                        if u and u:getName() == unitName then
+                            local pos = u:getPosition()
+                            if pos and pos.p then
+                                pos = applyHeadingToPosition(pos, newHeading)
+                                if type(u.setPosition) ~= "function" then
+                                    return "ERR:no_set_position", 1
+                                end
+                                local ok, err = pcall(function() u:setPosition(pos, false) end)
+                                if ok then
+                                    return "OK", 1
+                                else
+                                    return "ERR:setPosition_call_failed:" .. tostring(err), 1
+                                end
+                            end
+                            return "ERR:no_position", 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+return "ERR:not_found", 1
+]], unitName, groupName, numericHeading)
+
+    local missionCode = "local a,b= a_do_script([=[" .. innerCode .. "]=]) \n return b"
+    local result, success = AccModBridge.execInEnv("mission", missionCode)
+    return result, success
+end

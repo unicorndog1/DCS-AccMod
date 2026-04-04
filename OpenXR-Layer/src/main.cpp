@@ -124,25 +124,109 @@ DWORD WINAPI UDPReceiverThread(LPVOID param) {
                         LogFormat("Updated quad config: tanHalfFov=%.4f aspect=%.4f eye=%d distance=%.4f", tanHalfFov, aspect, (int)g_state.quadEyeVisibility, g_state.quadDistance);
                     }
                 }
+                else if (buffer[0] == 'B') {
+                    // Batched circles: "B,count,circle1;circle2;circle3;..."
+                    // Each circle has format: "x,y,radius,r,g,b,a,filled,thickness,labelR,labelG,labelB,labelA,label"
+                    int count = 0;
+                    char* dataStart = strchr(buffer + 2, ',');
+                    if (dataStart) {
+                        sscanf_s(buffer + 2, "%d", &count);
+                        dataStart++; // Skip the comma after count
+                        
+                        if (count > 0 && count < 100) { // Sanity check
+                            CriticalSectionLock lock(g_state.circlesMutex);
+                            
+                            char* context = nullptr;
+                            char* circleStr = strtok_s(dataStart, ";", &context);
+                            int parsedCount = 0;
+                            
+                            while (circleStr != nullptr && parsedCount < count) {
+                                CircleData circle;
+                                int filled;
+                                float thickness = 0.0f;
+                                char tempLabel[256] = {0};
+                                
+                                // Try extended format first
+                                int parsed = sscanf_s(circleStr, "%f,%f,%f,%f,%f,%f,%f,%d,%f,%f,%f,%f,%f,%255[^\n]",
+                                            &circle.x, &circle.y, &circle.radius,
+                                            &circle.r, &circle.g, &circle.b, &circle.a, &filled, &thickness,
+                                            &circle.labelR, &circle.labelG, &circle.labelB, &circle.labelA,
+                                            tempLabel, (unsigned)sizeof(tempLabel));
+
+                                bool parsedExtendedPacket = (parsed >= 13);
+                                if (!parsedExtendedPacket) {
+                                    memset(tempLabel, 0, sizeof(tempLabel));
+                                    parsed = sscanf_s(circleStr, "%f,%f,%f,%f,%f,%f,%f,%d,%f,%255[^\n]",
+                                                &circle.x, &circle.y, &circle.radius,
+                                                &circle.r, &circle.g, &circle.b, &circle.a, &filled, &thickness,
+                                                tempLabel, (unsigned)sizeof(tempLabel));
+                                }
+                                
+                                if (parsed >= 8) {
+                                    circle.filled = (filled != 0);
+                                    circle.thickness = thickness;
+
+                                    if (!parsedExtendedPacket) {
+                                        circle.labelR = circle.r;
+                                        circle.labelG = circle.g;
+                                        circle.labelB = circle.b;
+                                        circle.labelA = circle.a;
+                                    }
+                                    
+                                    if ((parsedExtendedPacket && parsed >= 14) || (!parsedExtendedPacket && parsed >= 10)) {
+                                        strncpy_s(circle.label, sizeof(circle.label), tempLabel, _TRUNCATE);
+                                    } else {
+                                        circle.label[0] = '\\0';
+                                    }
+                                    
+                                    g_state.circles.push_back(circle);
+                                    parsedCount++;
+                                }
+                                
+                                circleStr = strtok_s(nullptr, ";", &context);
+                            }
+                            
+                            LogFormat("Received batch: %d circles", parsedCount);
+                        }
+                    }
+                }
                 else if (buffer[0] == 'C' || buffer[0] == 'U') {
-                    // Parse circle data: "C,x,y,radius,r,g,b,a,filled,thickness,label"
+                    // Parse circle data:
+                    // "C,x,y,radius,r,g,b,a,filled,thickness,labelR,labelG,labelB,labelA,label"
+                    // Fallback for older senders:
+                    // "C,x,y,radius,r,g,b,a,filled,thickness,label"
                     CircleData circle;
                     int filled;
                     float thickness = 0.0f;
                     char tempLabel[256] = {0};
                     
-                    // Try parsing with label first (10 fields + label)
-                    int parsed = sscanf_s(buffer + 2, "%f,%f,%f,%f,%f,%f,%f,%d,%f,%255[^\n]",
+                    int parsed = sscanf_s(buffer + 2, "%f,%f,%f,%f,%f,%f,%f,%d,%f,%f,%f,%f,%f,%255[^\n]",
                                 &circle.x, &circle.y, &circle.radius,
                                 &circle.r, &circle.g, &circle.b, &circle.a, &filled, &thickness,
+                                &circle.labelR, &circle.labelG, &circle.labelB, &circle.labelA,
                                 tempLabel, (unsigned)sizeof(tempLabel));
+
+                    bool parsedExtendedPacket = (parsed >= 13);
+                    if (!parsedExtendedPacket) {
+                        memset(tempLabel, 0, sizeof(tempLabel));
+                        parsed = sscanf_s(buffer + 2, "%f,%f,%f,%f,%f,%f,%f,%d,%f,%255[^\n]",
+                                    &circle.x, &circle.y, &circle.radius,
+                                    &circle.r, &circle.g, &circle.b, &circle.a, &filled, &thickness,
+                                    tempLabel, (unsigned)sizeof(tempLabel));
+                    }
                     
                     if (parsed >= 8) {
                         circle.filled = (filled != 0);
                         circle.thickness = thickness;
+
+                        if (!parsedExtendedPacket) {
+                            circle.labelR = circle.r;
+                            circle.labelG = circle.g;
+                            circle.labelB = circle.b;
+                            circle.labelA = circle.a;
+                        }
                         
-                        // Copy label if present (parsed == 10), otherwise leave empty
-                        if (parsed >= 10) {
+                        if ((parsedExtendedPacket && parsed >= 14) || (!parsedExtendedPacket && parsed >= 10)) {
                             strncpy_s(circle.label, sizeof(circle.label), tempLabel, _TRUNCATE);
                         } else {
                             circle.label[0] = '\0';
