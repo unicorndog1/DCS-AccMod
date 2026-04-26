@@ -70,6 +70,10 @@ local JOY_UDP_PORT = 7778
 local udp = nil
 local lastUdpRebindAttempt = 0
 
+-- ============================================================================
+-- SECTION: JOYSTICK_UDP_LIFECYCLE
+-- Purpose: bind/rebind/cleanup for joystick UDP ingress on port 7778.
+-- ============================================================================
 local function bindJoystickUdpSocket()
     -- During script reload, prefer reusing a previously created socket to avoid
     -- bind races where the port is still held by the previous chunk.
@@ -149,6 +153,42 @@ local function loadAccJoyBridge()
     return joybridge
 end
 
+-- Primary device GUID for filtering (device at index 1)
+local primaryDeviceGuid = nil
+
+-- Get GUID of device at specified index
+local function getPrimaryDeviceGuid()
+    if not AccJoyBridge or type(AccJoyBridge.listDevices) ~= "function" then
+        log.write('AccMod', log.WARNING, "AccJoyBridge: listDevices not available")
+        return nil
+    end
+    
+    local ok, payload = pcall(AccJoyBridge.listDevices)
+    if not ok then
+        log.write('AccMod', log.ERROR, string.format("AccJoyBridge: listDevices failed - %s", tostring(payload)))
+        return nil
+    end
+    
+    if type(payload) ~= "string" then
+        log.write('AccMod', log.WARNING, string.format("AccJoyBridge: listDevices returned invalid type (%s)", type(payload)))
+        return nil
+    end
+    
+    log.write('AccMod', log.INFO, string.format("AccJoyBridge: listDevices returned %d bytes", #payload))
+    
+    for line in payload:gmatch("[^\n]+") do
+        local index, guid = line:match("^(%d+)\t([^\t]*)")
+        log.write('AccMod', log.INFO, string.format("AccJoyBridge: Device %s GUID = %s", tostring(index), tostring(guid)))
+        if index and guid and guid ~= "" and tonumber(index) == 1 then
+            log.write('AccMod', log.INFO, string.format("AccJoyBridge: Primary device (index 1) GUID = %s", guid))
+            return guid
+        end
+    end
+    
+    log.write('AccMod', log.WARNING, "AccJoyBridge: No device found at index 1")
+    return nil
+end
+
 -- Initialize AccJoyBridge (starts joystick monitoring)
 local function initializeAccJoyBridge()
     AccJoyBridge = loadAccJoyBridge()
@@ -163,8 +203,8 @@ local function initializeAccJoyBridge()
             end
         end
 
-        -- Start monitoring all connected joysticks when supported by the bridge.
-        -- Legacy bridge builds may ignore -1 and fall back to a default device.
+        -- Start monitoring all connected joysticks.
+        -- Messages will be filtered by primary device GUID.
         local okStart, success, err = pcall(AccJoyBridge.start, -1)
         if not okStart then
             success = false
@@ -172,6 +212,8 @@ local function initializeAccJoyBridge()
         end
         if success then
             log.write('AccMod', log.INFO, "AccJoyBridge: Joystick monitoring started (all devices)")
+            -- Get primary device GUID after successful start
+            primaryDeviceGuid = getPrimaryDeviceGuid()
         else
             log.write('AccMod', log.ERROR, "AccJoyBridge: Failed to start - " .. tostring(err))
          
@@ -218,6 +260,7 @@ local function ensureAccJoyBridgeRunning()
 
     if success then
         log.write('AccMod', log.INFO, "AccJoyBridge: Monitor restart succeeded")
+        primaryDeviceGuid = getPrimaryDeviceGuid()
     else
         log.write('AccMod', log.ERROR, "AccJoyBridge: Monitor restart failed - " .. tostring(err))
     end
@@ -313,6 +356,10 @@ local function getAccModBridge()
     return AccModBridge or base.AccModBridge or base._G.AccModBridge
 end
 
+-- ============================================================================
+-- SECTION: MISSION_ENV_SCRIPT_BRIDGE
+-- Purpose: helper used by mission-environment calls through AccModBridge.
+-- ============================================================================
 local function wrapMissionScript(innerCode)
     return "local a,b= a_do_script([=[" .. innerCode .. "]=]) \n return b"
 end
@@ -826,7 +873,22 @@ local function cycleLayerRenderMode()
         return
     end
 
-    AccModOverlayManager.layerRenderMode = ((AccModOverlayManager.layerRenderMode or LAYER_RENDER_MODE_DOTS_LABELS_CLOSEST_RING) + 1) % 4
+    -- Cycle through the visually distinct LAYER states only:
+    -- DOTS_ONLY -> DOTS_LABELS_CLOSEST_RING -> NOTHING -> ...
+    -- (DOTS_WITH_LABELS is intentionally skipped because it is visually
+    -- nearly identical to DOTS_LABELS_CLOSEST_RING, which made the cycle
+    -- feel like a 2-state on/off toggle in the headset.)
+    local current = AccModOverlayManager.layerRenderMode or LAYER_RENDER_MODE_DOTS_LABELS_CLOSEST_RING
+    local nextMode
+    if current == LAYER_RENDER_MODE_DOTS_ONLY then
+        nextMode = LAYER_RENDER_MODE_DOTS_LABELS_CLOSEST_RING
+    elseif current == LAYER_RENDER_MODE_DOTS_LABELS_CLOSEST_RING then
+        nextMode = LAYER_RENDER_MODE_NOTHING
+    else
+        -- Covers NOTHING and the now-skipped DOTS_WITH_LABELS state.
+        nextMode = LAYER_RENDER_MODE_DOTS_ONLY
+    end
+    AccModOverlayManager.layerRenderMode = nextMode
     log.write('AccMod', log.INFO,
         "OpenXR layer render mode: " .. getLayerRenderModeName(AccModOverlayManager.layerRenderMode))
 
@@ -834,6 +896,11 @@ local function cycleLayerRenderMode()
     syncManagerRenderModeUi()
 end
 
+-- ============================================================================
+-- SECTION: VR_MODE_TOGGLE_AND_OPENXR_HANDOFF
+-- Purpose: cycle OFF/OVERLAY/LAYER, enforce OpenXR availability rules,
+-- and clear/send state needed by layer mode.
+-- ============================================================================
 local function performVrModeToggle(managerInstance, vrButton, vrResetButton)
     if not managerInstance then
         return
@@ -904,6 +971,54 @@ local function performVrModeToggle(managerInstance, vrButton, vrResetButton)
         log.write('AccMod', log.INFO, "VR Mode: ON LAYER")
     end
 
+    ensureUnitHighlightPanelForMode()
+    syncManagerRenderModeUi()
+    
+    -- Save configuration to persist VR mode across sessions
+    managerInstance:saveConfiguration()
+end
+
+-- Sync VR button state to match current vrModeEnabled value (without toggling)
+local function syncVrButtonState(managerInstance)
+    if not managerInstance then
+        return
+    end
+    
+    local vrButton = managerInstance.vrButtonWidget
+    local vrResetButton = managerInstance.vrResetButtonWidget
+    
+    if managerInstance.vrModeEnabled == 0 then
+        if vrButton then vrButton:setText("VR Mode: OFF") end
+        if vrResetButton then vrResetButton:setVisible(false) end
+        log.write('AccMod', log.INFO, "VR button synced: OFF")
+    elseif managerInstance.vrModeEnabled == 1 then
+        if vrResetButton then vrResetButton:setVisible(true) end
+        if vrButton then
+            if managerInstance.openxrLayerAvailable == false then
+                vrButton:setText("VR Mode: ON")
+            else
+                vrButton:setText("VR Mode: ON (overlay)")
+            end
+        end
+        log.write('AccMod', log.INFO, "VR button synced: ON (window overlay)")
+    elseif managerInstance.vrModeEnabled == 2 then
+        if vrResetButton then vrResetButton:setVisible(false) end
+        if vrButton then
+            if managerInstance.openxrLayerAvailable == true then
+                vrButton:setText("VR Mode: LAYER")
+            else
+                vrButton:setText("VR Mode: LAYER (?)")
+            end
+        end
+        -- Ensure UDP socket is created for LAYER mode
+        if not managerInstance.openxrUDP then
+            managerInstance.openxrUDP = socket.udp()
+            managerInstance.openxrUDP:settimeout(0)
+            log.write('AccMod', log.INFO, "OpenXR UDP socket created during sync")
+        end
+        log.write('AccMod', log.INFO, "VR button synced: ON LAYER")
+    end
+    
     ensureUnitHighlightPanelForMode()
     syncManagerRenderModeUi()
 end
@@ -1474,7 +1589,8 @@ function UnitHighlightPanel.new()
     o.declutterLayoutCache = {}
     o.declutterDotPictures = {}
     o.labelLeaderDotCount = 16
-    o.maxDots = 50  -- Maximum number of dots/rings to create
+    o.maxDots = 100  -- Maximum number of dots/rings to render per frame
+    o.maxLabels = 50 -- Only the N units closest to the visual center get labels
     o.showUnitLabels = true  -- Flag to show/hide unit name labels
     o.lastUpdateTime = 0
     o.lastDebugLog = 0  -- For debug logging throttle
@@ -1947,7 +2063,8 @@ function UnitHighlightPanel:renderDeclutteredLabels(detectedUnits, selfData, win
     local screenCenterX = winW / 2
     local screenCenterY = winH / 2
 
-    for _, unit in ipairs(detectedUnits) do
+    for i, unit in ipairs(detectedUnits) do
+        if i > (self.maxLabels or i) then break end
         table.insert(labelUnits, unit)
     end
 
@@ -2384,114 +2501,188 @@ function UnitHighlightPanel:worldToScreen2(worldPos, cameraAzimuth, cameraElevat
     return screenX, screenY
 end
 
+-- Module-level constants used by the hot detection loop. Keeping these out of
+-- detectUnits avoids reallocating tables on every frame.
+local UNIT_DETECT_LEVEL1_VALID = {[0]=false,[1]=true,[2]=true,[3]=true,[4]=false,[5]=false}
+local UNIT_DETECT_LEVEL2_VALID = {[1]=true,[2]=true,[4]=true,[12]=true,[16]=true,[17]=true,[20]=true}
+local UNIT_DETECT_MAX_DIST = 10000
+local UNIT_DETECT_MAX_DIST_SQ = UNIT_DETECT_MAX_DIST * UNIT_DETECT_MAX_DIST
+local UNIT_DETECT_PLAYER_RADIUS_SQ = 25  -- 5m radius around camera/self treated as the player
+-- Reject anything far outside the forward cone before doing per-object projection.
+-- cos(89°) ~= 0.0175, so we cull pretty much everything not at least near-side of the camera plane.
+local UNIT_DETECT_MIN_NORMALIZED_DOT = 0.0175
+
+-- Cached player plane id (DCS exposes this stably; resolve once per script load).
+local cachedPlayerPlaneId = nil
+do
+    if base.Export and base.Export.LoGetPlayerPlaneId then
+        local ok, pid = pcall(base.Export.LoGetPlayerPlaneId)
+        if ok then cachedPlayerPlaneId = pid end
+    end
+end
+local function refreshCachedPlayerPlaneId()
+    if base.Export and base.Export.LoGetPlayerPlaneId then
+        local ok, pid = pcall(base.Export.LoGetPlayerPlaneId)
+        if ok then cachedPlayerPlaneId = pid end
+    end
+end
+
 -- Detect and collect all visible units (core detection logic)
 -- Returns: detectedUnits table, or nil if no world/player data available
 function UnitHighlightPanel:detectUnits()
-    local now = os.clock()
-    
     if not self.window then
         return nil
     end
-    
-    -- Get window bounds for screen projection
+
+    -- Get window bounds for screen projection (cached once per frame).
     local winX, winY, winW, winH = self.window:getBounds()
-    
-    -- Get all world objects
+
     local worldObjects = base.Export.LoGetWorldObjects()
     if not worldObjects then
         return nil, "No world data"
     end
-    
-    -- Get player data for camera info
+
     local selfData = base.Export.LoGetSelfData()
     if not selfData then
         return nil, "No camera data"
     end
-    
-    -- Collect all visible units (excluding static objects)
+
+    -- Cache once per frame
+    local manager = AccModOverlayManager
+    local vrMode = (manager and manager.vrModeEnabled) or 0
+    local showAll = manager and manager.showAllUnits == true
+    local maxDots = self.maxDots
+
+    -- VR-mode-1 uses the aircraft-relative plane projection; everything else
+    -- (off, LAYER) uses the cheap inline pinhole projection.
+    local useVrPlane = (vrMode == 1) and manager and manager.vrCameraOffsetLocal ~= nil
+
+    local camera
+    if useVrPlane then
+        camera = manager:getVRCameraAdjustedForAircraft()
+    end
+    if not camera then
+        camera = base.Export.LoGetCameraPosition()
+    end
+    if not camera or not camera.p or not camera.x then
+        return nil, "No camera data"
+    end
+
+    local camPx, camPy, camPz = camera.p.x, camera.p.y, camera.p.z
+    local fx, fy, fz = camera.x.x, camera.x.y, camera.x.z  -- forward
+    local ux, uy, uz = camera.y.x, camera.y.y, camera.y.z  -- up
+    local lx, ly, lz = camera.z.x, camera.z.y, camera.z.z  -- left
+
+    local fov = getEffectiveOverlayFovDegrees() * math.pi / 180
+    local tanHalfFov = math.tan(fov * 0.5)
+    local aspect = (winH > 0) and (winW / winH) or 1.0
+    local halfW = winW * 0.5
+    local halfH = winH * 0.5
+
+    -- Pre-stringify player id once; world object IDs may be strings or numbers.
+    local playerIdNum = cachedPlayerPlaneId
+    local playerIdStr = (playerIdNum ~= nil) and tostring(playerIdNum) or nil
+
+    -- selfData.Position is used for the "near self" fallback exclusion.
+    local selfPos = selfData.Position
+    local selfPx = selfPos and selfPos.x or camPx
+    local selfPy = selfPos and selfPos.y or camPy
+    local selfPz = selfPos and selfPos.z or camPz
+
     local detectedUnits = {}
-    local unitCount = 0
-    local totalCandidates = 0
-    local onScreenCount = 0
-    local losFailedCount = 0
-    
-    -- Cache camera position once per frame (performance optimization)
-    local camera = base.Export.LoGetCameraPosition()
-    
-    -- Check each unit - find all visible on screen
+    local detectedCount = 0
+    local sqrt = math.sqrt
+    local sortByFacingDot = function(a, b) return a.facingDot > b.facingDot end
+
     for objID, objData in pairs(worldObjects) do
-        if objData and objData.Position and objData.Type then
-            -- Skip static objects (Type.level1 == 4 means structure/static)
-          --  log.write('AccMod', log.INFO, string.format("Checking object ID:%s Type level1:%d", objData.Name, objData.Type.level1))
-            local valid = {[0]=false, [1]=true, [2]=true, [3]=true,[4]=false,[5]=false}
-            local valid2 = {[1]=true, [2]=true ,[4]=true,[17]=true,[16]=true,[20]=true,[12]=true}
-            if valid[objData.Type.level1] and valid2[objData.Type.level2] then
-                totalCandidates = totalCandidates + 1
-                
-                -- Convert world position to screen position
-                local screenX, screenY = self:worldToScreen(objData.Position, 0, 0)
-                
-                if screenX and screenY then
-                    -- Check if screen position is within screen bounds
-                    if screenX >= 0 and screenX <= winW and
-                       screenY >= 0 and screenY <= winH then
-                        onScreenCount = onScreenCount + 1
-                        
-                        -- Check line of sight from player to unit
-                        local hasLOS = true
-                        local objName = objData.UnitName or objData.Name
-                        if selfData.Position and objData.Position then
-                            hasLOS = hasFullLOS(selfData.Position, objData.Position, objName)
-                            if not hasLOS then
-                                losFailedCount = losFailedCount + 1
-                            end
+        local pos = objData and objData.Position
+        local typ = objData and objData.Type
+        if pos and typ then
+            -- Player exclusion: id match (covered for both numeric and string ids)
+            -- with a 5m fallback radius around the camera/self position.
+            local dxs = pos.x - selfPx
+            local dys = pos.y - selfPy
+            local dzs = pos.z - selfPz
+            local nearSelf = (dxs*dxs + dys*dys + dzs*dzs) < UNIT_DETECT_PLAYER_RADIUS_SQ
+
+            local isPlayer = nearSelf
+            if not isPlayer and playerIdStr then
+                if objID == playerIdNum or tostring(objID) == playerIdStr then
+                    isPlayer = true
+                end
+            end
+
+            local passesCategoryFilter = showAll
+                or (UNIT_DETECT_LEVEL1_VALID[typ.level1] and UNIT_DETECT_LEVEL2_VALID[typ.level2])
+
+            if (not isPlayer) and passesCategoryFilter then
+                -- Camera-relative offset (reused for projection, distance, dot product).
+                local dx = pos.x - camPx
+                local dy = pos.y - camPy
+                local dz = pos.z - camPz
+
+                -- Cheap distance-squared cull (avoids sqrt for far rejections).
+                local distSq = dx*dx + dy*dy + dz*dz
+                if distSq <= UNIT_DETECT_MAX_DIST_SQ and distSq > 1e-6 then
+                    -- Forward-axis projection. localZ <= 0 means behind the camera.
+                    local localZ = dx*fx + dy*fy + dz*fz
+
+                    -- Compute normalized facing dot product for ranking.
+                    local distance = sqrt(distSq)
+                    local facingDot = localZ / distance
+
+                    if facingDot > UNIT_DETECT_MIN_NORMALIZED_DOT then
+                        local screenX, screenY
+                        if useVrPlane then
+                            -- Fall back to the existing VR plane-intersection projection.
+                            screenX, screenY = self:worldToScreen(pos, 0, 0)
+                        else
+                            -- Inline pinhole projection (matches non-VR worldToScreen).
+                            local localX = dx*lx + dy*ly + dz*lz
+                            local localY = dx*ux + dy*uy + dz*uz
+                            local invDepth = 1 / localZ
+                            screenX = ((localX * invDepth) / tanHalfFov / aspect + 1) * halfW
+                            screenY = (1 - (localY * invDepth) / tanHalfFov) * halfH
                         end
-                        
-                        -- Only show units with LOS
-                        if hasLOS then
-                            -- Calculate distance for info display
-                            local dx = objData.Position.x - selfData.Position.x
-                            local dy = objData.Position.y - selfData.Position.y
-                            local dz = objData.Position.z - selfData.Position.z
-                            local distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-                            
-                            -- Check if unit is within forward-facing cone (use cached camera)
-                            local facingDot = self:getForwardFacingDot(objData.Position, camera)
-                            
-                            -- Skip units beyond 10km (10000 meters)
-                            if distance <= 10000 then
-                                unitCount = unitCount + 1
-                        --        log.write('AccMod', log.INFO, string.format("Unit visible: %s at %.1fm, screen[%.1f,%.1f]",
-                        --            objData.UnitName or objData.Name or "unknown", distance, screenX, screenY))
-                                
-                                table.insert(detectedUnits, {
-                                    data = objData,
-                                    unitId = objID,
-                                    screenX = screenX,
-                                    screenY = screenY,
-                                    distance = distance,
-                                    coalition = objData.Coalition or 0,
-                                    facingDot = facingDot  -- Store dot product for rendering
-                                })
-                            end
-                            
-                            -- Stop if we reach max dots
-                            if unitCount >= self.maxDots then
-                                log.write('AccMod', log.WARNING, "Max dots reached, stopping detection")
-                                break
-                            end
+
+                        if screenX and screenY
+                            and screenX >= 0 and screenX <= winW
+                            and screenY >= 0 and screenY <= winH then
+                            detectedCount = detectedCount + 1
+                            detectedUnits[detectedCount] = {
+                                data = objData,
+                                unitId = objID,
+                                screenX = screenX,
+                                screenY = screenY,
+                                distance = distance,
+                                coalition = objData.Coalition or 0,
+                                facingDot = facingDot,
+                            }
                         end
                     end
                 end
             end
         end
     end
+
+    -- Always sort by facing dot DESC: downstream rendering relies on this order
+    -- to limit labels to the closest N units (`self.maxLabels`). Sorting up to
+    -- ~100 entries per frame is negligible.
+    if detectedCount > 1 then
+        table.sort(detectedUnits, sortByFacingDot)
+    end
+
+    -- Keep only the N units closest to the visual center.
+    if detectedCount > maxDots then
+        for i = detectedCount, maxDots + 1, -1 do
+            detectedUnits[i] = nil
+        end
+    end
     
     -- Log detection summary every 2 seconds to avoid spam
-    if not self.lastDetectionLog or (now - self.lastDetectionLog) >= 2 then
-       -- log.write('AccMod', log.INFO, string.format("Detection: %d candidates, %d on-screen, %d LOS-blocked, %d visible",
-       --     totalCandidates, onScreenCount, losFailedCount, unitCount))
-        self.lastDetectionLog = now
+    if not self.lastDetectionLog or (os.clock() - self.lastDetectionLog) >= 2 then
+       -- log.write('AccMod', log.INFO, string.format("Detection: %d visible", #detectedUnits))
+        self.lastDetectionLog = os.clock()
     end
     
     return detectedUnits, nil, selfData
@@ -2570,10 +2761,12 @@ function UnitHighlightPanel:renderWindowOverlay(detectedUnits, selfData)
             -- Hide the other ring image
             otherRingImage:setVisible(false)
             
-            -- Update unit label if enabled
+            -- Update unit label if enabled. detectedUnits is sorted by facingDot
+            -- DESC, so only the first `self.maxLabels` get labels.
+            local labelAllowed = i <= (self.maxLabels or i)
             if showDeclutterInWindow and self.unitLabels[i] then
                 self.unitLabels[i]:setVisible(false)
-            elseif showLabelsInWindow and self.unitLabels[i] then
+            elseif showLabelsInWindow and labelAllowed and self.unitLabels[i] then
                 local label = self.unitLabels[i]
                 local unitName = unit.data.Name or "Unknown"
                 label:setText(unitName)
@@ -2750,11 +2943,14 @@ function UnitHighlightPanel:renderOpenXRLayer(detectedUnits, selfData)
                 filledFlag = 0
             end
         else
-            -- Default layer mode renders contacts as small filled dots.
-            radius = 5
+            -- Default layer mode renders contacts as filled dots. Bigger / more
+            -- opaque than before so the "Dots only" cycle state is visually
+            -- distinct from "Nothing" in the headset.
+            radius = 9
             filledFlag = 1
+            a = math.min(1.0, a + 0.15)
             if showClosestRingInLayer then
-                a = a * 0.6  -- Dim the dots slightly when a closest ring is active
+                a = a * 0.7  -- Dim the dots slightly when a closest ring is active
             end
         end
         
@@ -2764,16 +2960,18 @@ function UnitHighlightPanel:renderOpenXRLayer(detectedUnits, selfData)
         -- Ring thickness: thicker for better visibility (6% of radius)
         local normThickness = normRadius * 0.06
         
-        -- Get unit type for label (only if enabled)
+        -- Get unit type for label (only if enabled, and only for the closest
+        -- self.maxLabels units — detectedUnits is sorted by facingDot DESC).
         local unitType = ""
-        if showLabelsInLayer then
+        local emitLabel = showLabelsInLayer and i <= (self.maxLabels or i)
+        if emitLabel then
             unitType = unit.data.Name or "Unknown"
         end
 
         local labelR = r
         local labelG = g
         local labelB = b
-        local labelA = 0.95
+        local labelA = emitLabel and 0.95 or 0.0
      
         -- Build circle data string (without packet prefix)
         local circleData = string.format("%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%d,%.4f,%.2f,%.2f,%.2f,%.2f,%s",
@@ -2800,12 +2998,17 @@ end
 -- Main update function - orchestrates detection and rendering
 function UnitHighlightPanel:update()
     local now = os.clock()
-    
-    -- Update every 0.1 seconds (60 FPS)
-    if now - self.lastUpdateTime < (1.0/60) then
+
+    -- LAYER mode is bandwidth-bound on UDP send and not visually improved by 60 Hz
+    -- updates (the OpenXR quad is head-locked and contact positions barely move
+    -- per-frame). Throttle it to ~30 Hz; window/off modes still tick at 60 Hz.
+    local managerForRate = AccModOverlayManager
+    local layerMode = managerForRate and managerForRate.vrModeEnabled == 2
+    local minInterval = layerMode and (1.0 / 30) or (1.0 / 60)
+    if now - self.lastUpdateTime < minInterval then
         return
     end
-    
+
     self.lastUpdateTime = now
     
     -- Phase 1: Detect units
@@ -7181,6 +7384,10 @@ function AccOverlay:positionCallback()
 	end
 end
 -------
+-- ============================================================================
+-- SECTION: ACCMOD_OVERLAY_MANAGER_STATE
+-- Purpose: singleton state/config hub for panels, VR mode, OpenXR, and UI.
+-- ============================================================================
 AccModOverlayManager = {
     windows = {},
     first = true,
@@ -7206,6 +7413,8 @@ AccModOverlayManager = {
     vrCameraOrientationLocal = nil, -- Camera orientation vectors in aircraft local coordinates
     vrButtonWidget = nil, -- Reference to VR toggle button
     vrResetButtonWidget = nil, -- Reference to reset button
+    showAllUnits = false, -- When true, bypasses static/structure filter and shows every world object
+    showAllButtonWidget = nil, -- Reference to Show All toggle button
     -- OpenXR Layer UDP socket
     openxrUDP = nil, -- UDP socket for sending to OpenXR layer (port 7779)
     openxrLayerAvailable = nil, -- nil=unchecked, true=available, false=unavailable
@@ -7363,6 +7572,11 @@ function AccModOverlayManager:syncKeybindUi()
     end
 end
 
+-- ============================================================================
+-- SECTION: MANAGER_CONFIG_PERSISTENCE
+-- Purpose: load/save persisted manager settings from AccModManager.lua,
+-- including vrModeEnabled and unit placer state.
+-- ============================================================================
 function AccModOverlayManager:loadConfiguration()
     local tbl = Tools.safeDoFile(lfs.writedir() .. 'Config\\AccModManager.lua', false)
     if tbl and tbl.config then
@@ -7378,6 +7592,13 @@ function AccModOverlayManager:loadConfiguration()
         end
         self.managerConfig.keybinds = normalizeKeybindConfig(self.managerConfig.keybinds)
         self.panelsEnabled = self.managerConfig.panelsEnabled
+        -- Load VR mode setting
+        if self.managerConfig.vrModeEnabled ~= nil then
+            self.vrModeEnabled = self.managerConfig.vrModeEnabled
+        end
+        if self.managerConfig.showAllUnits ~= nil then
+            self.showAllUnits = self.managerConfig.showAllUnits == true
+        end
         self:ensureUnitPlacerConfig()
         -- Load global mode from manager config
         if tbl.config.globalMode then
@@ -7438,6 +7659,8 @@ function AccModOverlayManager:saveConfiguration()
         self.managerConfig.globalMode = self.globalMode
         self.managerConfig.selectedTab = self.managerConfig.selectedTab or "accessibility"
         self.managerConfig.panelsEnabled = self.panelsEnabled
+        self.managerConfig.vrModeEnabled = self.vrModeEnabled
+        self.managerConfig.showAllUnits = self.showAllUnits == true
         self.managerConfig.keybinds = normalizeKeybindConfig(self.managerConfig.keybinds)
         if self.unitPlacerPanel then
             self.managerConfig.unitPlacer = self.unitPlacerPanel:exportConfigState()
@@ -7998,6 +8221,26 @@ function AccModOverlayManager:createManagerWindow()
     end)
     self.vrButtonWidget = btnVRMode
 
+    -- Show All Units toggle button (placed near the VR Mode button).
+    -- When enabled, the unit highlighter overlay bypasses the static/structure filter
+    -- and renders every world object (still capped to the closest N to the visual center).
+    local function getShowAllButtonText()
+        return (managerInstance.showAllUnits == true) and "Show All: ON" or "Show All: OFF"
+    end
+    local btnShowAll = Button.new(getShowAllButtonText())
+    labelsPanel:insertWidget(btnShowAll)
+    btnShowAll:setBounds(160, 188, 140, 28)
+    btnShowAll:setVisible(true)
+    btnShowAll:addChangeCallback(function()
+        managerInstance.showAllUnits = not (managerInstance.showAllUnits == true)
+        btnShowAll:setText(getShowAllButtonText())
+        log.write('AccMod', log.INFO, "Show All Units toggled: " .. tostring(managerInstance.showAllUnits))
+        if managerInstance.saveConfiguration then
+            pcall(function() managerInstance:saveConfiguration() end)
+        end
+    end)
+    self.showAllButtonWidget = btnShowAll
+
     -- Register hotkey on manager window so it works even when panels are hidden
     self.managerWindow:addHotKeyCallback("Ctrl+Shift+1", AccModOverlayManager.onHotKey)
 
@@ -8038,6 +8281,9 @@ function AccModOverlayManager:createManagerWindow()
             self.openxrStatusWidget:setText("OpenXR Layer: Status unknown")
         end
     end
+
+    -- Sync VR button state to match loaded configuration
+    syncVrButtonState(self)
 
     ensureUnitHighlightPanelForMode()
     syncManagerRenderModeUi()
@@ -8685,21 +8931,27 @@ function JankyJoy:onSimulationFrame()
         local buttonNumeric = nil
         local buttonId = nil
         local eventState = nil
+        local shouldProcess = false
 
+        -- Parse device-prefixed button message
         deviceGuid, buttonNumeric, eventState = msg:match("^JOY_([^_]+)_BTN_(%d+)_(%u+)$")
         if buttonNumeric and (eventState == "PRESSED" or eventState == "RELEASED") then
             buttonId = "BTN_" .. tostring(buttonNumeric)
+            -- Only process if from primary device
+            shouldProcess = (deviceGuid == primaryDeviceGuid)
         else
+            -- Parse legacy button message (backward compatibility)
             local legacyButton
             legacyButton, eventState = msg:match("^(BTN_%d+)_(%u+)$")
             if legacyButton and (eventState == "PRESSED" or eventState == "RELEASED") then
                 buttonId = legacyButton
                 buttonNumeric = legacyButton:match("BTN_(%d+)")
                 deviceGuid = "*"
+                shouldProcess = true  -- Legacy messages always processed
             end
         end
 
-        if buttonId and buttonNumeric then
+        if buttonId and buttonNumeric and shouldProcess then
             setJankyJoyButtonState(buttonId, eventState == "PRESSED", deviceGuid)
             local consumed = dispatchJoystickBinding(deviceGuid or "*", tonumber(buttonNumeric), eventState)
             if not consumed then
@@ -8707,14 +8959,20 @@ function JankyJoy:onSimulationFrame()
             end
         end
 
+        -- Parse axis messages
+        local axisDeviceGuid = nil
         local axis, value = msg:match("AXIS_(%d+)_([%-%.%d]+)")
-        if not axis then
-            local _dev, devAxis, devValue = msg:match("^JOY_([^_]+)_AXIS_(%d+)_([%-%.%d]+)$")
-            axis = devAxis
-            value = devValue
+        if axis then
+            -- Legacy axis message (backward compatibility)
+            shouldProcess = true
+        else
+            -- Device-prefixed axis message
+            axisDeviceGuid, axis, value = msg:match("^JOY_([^_]+)_AXIS_(%d+)_([%-%.%d]+)$")
+            -- Only process if from primary device
+            shouldProcess = (axisDeviceGuid == primaryDeviceGuid)
         end
 
-        if base.tonumber(axis) == 2 then
+        if base.tonumber(axis) == 2 and shouldProcess then
             JankyJoy.currentZoomAxis = base.tonumber(value)
             local function calcY(x)
                 return 32.2624 * math.exp(0.9241 * x) - 6.1548

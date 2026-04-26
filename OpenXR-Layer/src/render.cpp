@@ -488,6 +488,7 @@ void RenderTextToTexture() {
 
                 // Draw text labels above circles
                 for (const auto& circle : circlesToRender) {
+                    if (circle.labelA <= 0.001f) continue;  // Explicitly disabled by sender
                     if (circle.label[0] == '\0') continue;  // Skip if no label
                     
                     float correctedX = circle.x - xUvShift;

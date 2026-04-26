@@ -176,7 +176,7 @@ DWORD WINAPI UDPReceiverThread(LPVOID param) {
                                     if ((parsedExtendedPacket && parsed >= 14) || (!parsedExtendedPacket && parsed >= 10)) {
                                         strncpy_s(circle.label, sizeof(circle.label), tempLabel, _TRUNCATE);
                                     } else {
-                                        circle.label[0] = '\\0';
+                                        circle.label[0] = '\0';
                                     }
                                     
                                     g_state.circles.push_back(circle);

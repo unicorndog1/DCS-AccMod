@@ -8,14 +8,14 @@ dialog = {
                             ["params"] = {
                                 ["bounds"] = {
                                     ["h"] = 24,
-                                    ["w"] = 76,
+                                    ["w"] = 64,
                                     ["x"] = 0,
                                     ["y"] = 0,
                                 },
                                 ["enabled"] = true,
                                 ["state"] = true,
-                                ["text"] = "Accessibility",
-                                ["tooltip"] = "Accessibility",
+                                ["text"] = "Panels",
+                                ["tooltip"] = "Panels",
                                 ["visible"] = true,
                                 ["zindex"] = 0,
                             },
@@ -34,8 +34,8 @@ dialog = {
                             ["params"] = {
                                 ["bounds"] = {
                                     ["h"] = 24,
-                                    ["w"] = 76,
-                                    ["x"] = 152,
+                                    ["w"] = 64,
+                                    ["x"] = 128,
                                     ["y"] = 0,
                                 },
                                 ["enabled"] = true,
@@ -60,8 +60,8 @@ dialog = {
                             ["params"] = {
                                 ["bounds"] = {
                                     ["h"] = 24,
-                                    ["w"] = 76,
-                                    ["x"] = 228,
+                                    ["w"] = 64,
+                                    ["x"] = 192,
                                     ["y"] = 0,
                                 },
                                 ["enabled"] = true,
@@ -86,8 +86,8 @@ dialog = {
                             ["params"] = {
                                 ["bounds"] = {
                                     ["h"] = 24,
-                                    ["w"] = 76,
-                                    ["x"] = 76,
+                                    ["w"] = 64,
+                                    ["x"] = 64,
                                     ["y"] = 0,
                                 },
                                 ["enabled"] = true,
@@ -112,8 +112,8 @@ dialog = {
                             ["params"] = {
                                 ["bounds"] = {
                                     ["h"] = 24,
-                                    ["w"] = 76,
-                                    ["x"] = 304,
+                                    ["w"] = 64,
+                                    ["x"] = 256,
                                     ["y"] = 0,
                                 },
                                 ["enabled"] = true,
