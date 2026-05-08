@@ -1,0 +1,17 @@
+{
+  "GeneratedMonitorSetupPath": "C:\\Users\\whatisit\\Saved Games\\DCS\\Config\\MonitorSetup\\AccMod_MFD_Auto.lua",
+  "CurrentMonitorSetupPath": null,
+  "SetupDate": "2026-05-08 11:38:39",
+  "CurrentMonitorSetup": "1camera",
+  "VDDConfigWritten": true,
+  "NumMFDs": 2,
+  "DCSFolder": "C:\\Users\\whatisit\\Saved Games\\DCS",
+  "VDDInstallDir": "C:\\Users\\whatisit\\AppData\\Local\\Microsoft\\WinGet\\Packages\\VirtualDrivers.Virtual-Display-Driver_Microsoft.Winget.Source_8wekyb3d8bbwe",
+  "VDDInstalled": true,
+  "CurrentDesktopWidth": 5120,
+  "CurrentDesktopHeight": 1440,
+  "MFDResolution": 800,
+  "VDDSettingsPath": "C:\\Users\\whatisit\\AppData\\Local\\Microsoft\\WinGet\\Packages\\VirtualDrivers.Virtual-Display-Driver_Microsoft.Winget.Source_8wekyb3d8bbwe\\vdd_settings.xml",
+  "VDDReloadApplied": false,
+  "DCSProfile": "DCS"
+}

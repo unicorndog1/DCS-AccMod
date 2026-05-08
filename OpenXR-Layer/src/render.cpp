@@ -2,6 +2,7 @@
 // This file handles the OpenXR frame submission and quad layer rendering
 
 #include "common.h"
+#include "perf.h"
 #include <d3d11.h>
 #include <DirectXMath.h>
 #include <memory>
@@ -22,12 +23,22 @@ struct RenderState {
     std::vector<XrSwapchainImageD3D11KHR> swapchainImages;
     int frameCount;
     ID3D11Texture2D* stagingTexture;
-    
+    // Number of consecutive frames where the circles list was empty.
+    // After we've cleared the swapchain at least once with no circles
+    // (emptyStreak >= 2), subsequent empty-frame work can be skipped entirely.
+    int emptyStreak;
+    // Hash of the last successfully-rasterized scene (circles+quad config).
+    // When the next frame's hash matches, we skip the Map/rasterize/Unmap
+    // and just CopyResource the persistent staging texture into the swapchain.
+    uint64_t lastSceneHash;
+    bool lastSceneHashValid;
+
     RenderState() : device(nullptr), context(nullptr), textSwapchain(XR_NULL_HANDLE),
                     session(XR_NULL_HANDLE), viewSpace(XR_NULL_HANDLE), 
                     instance(XR_NULL_HANDLE), initialized(false),
                     swapchainWidth(2048), swapchainHeight(1024), frameCount(0),
-                    stagingTexture(nullptr) {}
+                    stagingTexture(nullptr), emptyStreak(0),
+                    lastSceneHash(0), lastSceneHashValid(false) {}
 };
 
 static RenderState g_renderState;
@@ -210,7 +221,10 @@ bool CreateOverlaySwapchain() {
     
     LogFormat("Created swapchain with %d images", imageCount);
 
-    // Create staging texture for CPU-side circle drawing
+    // Create upload texture for CPU-side circle drawing.
+    // DYNAMIC + WRITE_DISCARD avoids GPU/CPU sync stalls (the previous
+    // STAGING + MAP_WRITE path produced 92ms map spikes when the GPU was
+    // still reading the texture from the prior CopyResource).
     if (g_renderState.device) {
         D3D11_TEXTURE2D_DESC stagingDesc = {};
         stagingDesc.Width = g_renderState.swapchainWidth;
@@ -219,13 +233,14 @@ bool CreateOverlaySwapchain() {
         stagingDesc.ArraySize = 1;
         stagingDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         stagingDesc.SampleDesc.Count = 1;
-        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.Usage = D3D11_USAGE_DYNAMIC;
         stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        stagingDesc.BindFlags = 0;
+        // DYNAMIC textures require at least one bind flag.
+        stagingDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
         HRESULT stagingHr = g_renderState.device->CreateTexture2D(&stagingDesc, nullptr, &g_renderState.stagingTexture);
         if (SUCCEEDED(stagingHr)) {
-            LogMessage("Created staging texture for circle rendering");
+            LogMessage("Created DYNAMIC upload texture (WRITE_DISCARD) for circle rendering");
         } else {
             LogFormat("Failed to create staging texture: 0x%08X", stagingHr);
         }
@@ -237,6 +252,7 @@ bool CreateOverlaySwapchain() {
 
 // Render text to swapchain texture
 void RenderTextToTexture() {
+    PERF_SCOPE(perf::K_renderText);
     if (!g_renderState.device || !g_renderState.context || g_renderState.textSwapchain == XR_NULL_HANDLE) {
         if (g_renderState.frameCount == 1) {
             LogMessage("RenderTextToTexture: Missing device, context, or swapchain!");
@@ -307,6 +323,7 @@ void RenderTextToTexture() {
         float quadAspect = 1.778f;
         XrEyeVisibility quadEyeVisibility = XR_EYE_VISIBILITY_BOTH;
         float quadDistance = 1.0f;
+        float zoomFactor = 1.0f;
         {
             CriticalSectionLock lock(g_state.circlesMutex);
             circlesToRender = g_state.circles;
@@ -314,6 +331,7 @@ void RenderTextToTexture() {
             quadAspect = g_state.quadAspect;
             quadEyeVisibility = g_state.quadEyeVisibility;
             quadDistance = g_state.quadDistance;
+            zoomFactor = g_state.zoomFactor;
         }
 
         float quadWidthWorld = 2.0f * quadDistance * quadTanHalfFov * quadAspect;
@@ -339,13 +357,47 @@ void RenderTextToTexture() {
             int H = (int)g_renderState.swapchainHeight;
             int maxDim = W > H ? W : H;                  // 512
 
+            // Cheap FNV-1a hash over circle data + relevant config. If the
+            // scene is unchanged we skip the Map/rasterize/Unmap block and
+            // just CopyResource the previously-rasterized staging texture.
+            uint64_t h = 1469598103934665603ULL;
+            auto hashBytes = [&](const void* p, size_t n) {
+                const uint8_t* b = (const uint8_t*)p;
+                for (size_t i = 0; i < n; ++i) {
+                    h ^= (uint64_t)b[i];
+                    h *= 1099511628211ULL;
+                }
+            };
+            size_t cn = circlesToRender.size();
+            hashBytes(&cn, sizeof(cn));
+            if (cn > 0) hashBytes(circlesToRender.data(), cn * sizeof(CircleData));
+            hashBytes(&quadTanHalfFov, sizeof(quadTanHalfFov));
+            hashBytes(&quadAspect, sizeof(quadAspect));
+            hashBytes(&quadDistance, sizeof(quadDistance));
+            hashBytes(&xUvShift, sizeof(xUvShift));
+            hashBytes(&zoomFactor, sizeof(zoomFactor));
+
+            bool dirtyHit = g_renderState.lastSceneHashValid && h == g_renderState.lastSceneHash;
+            if (dirtyHit) {
+                perf::RecordCounter(perf::K_dirtyHits, 1.0);
+                // Just upload the persistent staging texture — its contents are
+                // still the last-rendered scene, which matches what we want now.
+                int64_t copyStart = perf::Now();
+                g_renderState.context->CopyResource(texture, g_renderState.stagingTexture);
+                perf::RecordDuration(perf::K_copyResource, copyStart);
+            } else {
+                perf::RecordCounter(perf::K_dirtyMisses, 1.0);
+
+            int64_t mapStart = perf::Now();
             D3D11_MAPPED_SUBRESOURCE mapped = {};
             HRESULT mapHr = g_renderState.context->Map(
-                g_renderState.stagingTexture, 0, D3D11_MAP_WRITE, 0, &mapped);
+                g_renderState.stagingTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
 
             if (SUCCEEDED(mapHr)) {
                 uint8_t* pixels = reinterpret_cast<uint8_t*>(mapped.pData);
                 int rowPitch = (int)mapped.RowPitch;
+
+                int64_t pixelLoopStart = perf::Now();
 
                 // Clear staging to transparent black
                 for (int y = 0; y < H; y++) {
@@ -355,12 +407,18 @@ void RenderTextToTexture() {
                 // Draw each circle (ring by default, filled if filled==true)
                 // Two-pass rendering: white highlight outline, then main circle
                 for (const auto& circle : circlesToRender) {
-                    float correctedX = circle.x - xUvShift;
+                    // Apply VR zoom scaling: scale positions toward/away from center
+                    // When zoomed in (zoomFactor > 1), objects move away from center
+                    float zoomedX = 0.5f + (circle.x - 0.5f) * zoomFactor;
+                    float zoomedY = 0.5f + (circle.y - 0.5f) * zoomFactor;
+                    
+                    float correctedX = zoomedX - xUvShift;
                     float cx = correctedX * W;
-                    float cy = circle.y * H;
+                    float cy = zoomedY * H;
                     // Radius is normalized to max(winW,winH); un-normalize to texture pixels
                     // Compensate for quad distance scaling to maintain constant angular size
-                    float r = circle.radius * (float)maxDim / quadDistance;
+                    // Also scale radius with zoom to maintain apparent size
+                    float r = circle.radius * (float)maxDim / quadDistance * zoomFactor;
                     if (r < 1.0f) r = 1.0f;
 
                     uint8_t cr = (uint8_t)(circle.r * 255.0f);
@@ -491,10 +549,14 @@ void RenderTextToTexture() {
                     if (circle.labelA <= 0.001f) continue;  // Explicitly disabled by sender
                     if (circle.label[0] == '\0') continue;  // Skip if no label
                     
-                    float correctedX = circle.x - xUvShift;
+                    // Apply VR zoom scaling (same as circle positions)
+                    float zoomedX = 0.5f + (circle.x - 0.5f) * zoomFactor;
+                    float zoomedY = 0.5f + (circle.y - 0.5f) * zoomFactor;
+                    
+                    float correctedX = zoomedX - xUvShift;
                     float cx = correctedX * W;
-                    float cy = circle.y * H;
-                    float r = circle.radius * (float)maxDim / quadDistance;
+                    float cy = zoomedY * H;
+                    float r = circle.radius * (float)maxDim / quadDistance * zoomFactor;
                     if (r < 1.0f) r = 1.0f;
                     
                     // Position text 10 pixels above the circle's top edge
@@ -505,10 +567,15 @@ void RenderTextToTexture() {
                              255, 255, 255, circle.labelA);
                 }
 
+                perf::RecordDuration(perf::K_pixelLoop, pixelLoopStart);
+
                 g_renderState.context->Unmap(g_renderState.stagingTexture, 0);
+                perf::RecordDuration(perf::K_mapUnmap, mapStart);
 
                 // Upload CPU pixels to GPU swapchain texture
+                int64_t copyStart = perf::Now();
                 g_renderState.context->CopyResource(texture, g_renderState.stagingTexture);
+                perf::RecordDuration(perf::K_copyResource, copyStart);
 
                 if (g_renderState.frameCount <= 5) {
                     LogFormat("Frame %u: Rendered %d circles to texture, quad size: %.3f x %.3f",
@@ -517,11 +584,16 @@ void RenderTextToTexture() {
                         2.0f * g_state.quadTanHalfFov * g_state.quadAspect,
                         2.0f * g_state.quadTanHalfFov);
                 }
+
+                // Record the scene hash so the next frame can short-circuit.
+                g_renderState.lastSceneHash = h;
+                g_renderState.lastSceneHashValid = true;
             } else {
                 if (g_renderState.frameCount <= 2) {
                     LogFormat("Failed to map staging texture: 0x%08X", mapHr);
                 }
             }
+            } // end dirtyHit else (rasterize path)
         }
         
         rtv->Release();
@@ -611,9 +683,84 @@ XrResult XRAPI_CALL Hook_xrDestroySession(XrSession session) {
     return XR_SUCCESS;
 }
 
+// Hooked xrLocateViews to detect VR zoom by monitoring FOV changes
+XrResult XRAPI_CALL Hook_xrLocateViews(
+    XrSession session,
+    const XrViewLocateInfo* viewLocateInfo,
+    XrViewState* viewState,
+    uint32_t viewCapacityInput,
+    uint32_t* viewCountOutput,
+    XrView* views)
+{
+    // Call original function first
+    XrResult result = XR_ERROR_RUNTIME_FAILURE;
+    if (g_nextLocateViews) {
+        result = g_nextLocateViews(session, viewLocateInfo, viewState, 
+                                   viewCapacityInput, viewCountOutput, views);
+    }
+    
+    // If successful and we got view data, extract FOV for zoom detection
+    if (XR_SUCCEEDED(result) && views && viewCountOutput && *viewCountOutput > 0) {
+        // Use first view's FOV (left eye) for zoom calculation
+        const XrFovf& fov = views[0].fov;
+        
+        // Calculate vertical FOV span in radians
+        float verticalFOV = fov.angleUp - fov.angleDown;
+        
+        // Thread-safe update of zoom state
+        {
+            CriticalSectionLock lock(g_state.circlesMutex);
+            
+            // Capture baseline FOV on first frame (unzoomed state)
+            if (!g_state.fovInitialized && verticalFOV > 0.1f) {
+                g_state.baselineVerticalFOV = verticalFOV;
+                g_state.currentVerticalFOV = verticalFOV;
+                g_state.zoomFactor = 1.0f;
+                g_state.fovInitialized = true;
+                
+                LogFormat("VR Zoom: Baseline FOV captured = %.4f radians (%.1f degrees)",
+                         verticalFOV, verticalFOV * 57.2958f);
+            }
+            else if (g_state.fovInitialized && verticalFOV > 0.1f) {
+                // Update current FOV and calculate zoom factor
+                g_state.currentVerticalFOV = verticalFOV;
+                g_state.zoomFactor = g_state.baselineVerticalFOV / verticalFOV;
+                
+                // Log zoom changes (only when zoom factor changes significantly)
+                static float lastLoggedZoom = 1.0f;
+                if (fabsf(g_state.zoomFactor - lastLoggedZoom) > 0.1f) {
+                    LogFormat("VR Zoom: Factor = %.2fx (FOV: %.4f rad, %.1f deg)",
+                             g_state.zoomFactor, verticalFOV, verticalFOV * 57.2958f);
+                    lastLoggedZoom = g_state.zoomFactor;
+                }
+            }
+        }
+    }
+    
+    return result;
+}
+
 // Hooked xrEndFrame to inject quad layer overlay
 XrResult XRAPI_CALL Hook_xrEndFrame(XrSession session, const XrFrameEndInfo* frameEndInfo) {
+    PERF_SCOPE(perf::K_xrEndFrame);
     g_renderState.frameCount++;
+
+    // Periodic state emission (every ~30s, gated by frame count to keep cost trivial).
+    if ((g_renderState.frameCount % 1800) == 0) {
+        size_t cs = 0;
+        float qd = 1.0f, tf = 1.0f, ar = 1.0f;
+        {
+            CriticalSectionLock lock(g_state.circlesMutex);
+            cs = g_state.circles.size();
+            qd = g_state.quadDistance;
+            tf = g_state.quadTanHalfFov;
+            ar = g_state.quadAspect;
+        }
+        perf::RecordCounter(perf::K_circles, (double)cs);
+        perf::EmitState((double)cs, qd, tf, ar, 0, 0.0);
+    }
+
+    perf::OnFrameEnd();
     
     // Create swapchain on first frame
     if (!g_renderState.initialized && g_renderState.session != XR_NULL_HANDLE) {
@@ -635,7 +782,33 @@ XrResult XRAPI_CALL Hook_xrEndFrame(XrSession session, const XrFrameEndInfo* fra
     // If we have our swapchain, render and inject overlay
     if (g_renderState.initialized && g_renderState.textSwapchain != XR_NULL_HANDLE && 
         g_renderState.viewSpace != XR_NULL_HANDLE && frameEndInfo) {
-        
+
+        // Zero-circle fast path: once we've drawn (or cleared) one empty frame
+        // we don't need to keep submitting our quad layer at all. The quad
+        // would only show stale/transparent content. Skipping saves the entire
+        // swapchain acquire/wait/release + RTV creation + clear + quad layer
+        // composition cost (~500us p50 measured pre-optimization).
+        size_t circleCountQuick = 0;
+        {
+            CriticalSectionLock lock(g_state.circlesMutex);
+            circleCountQuick = g_state.circles.size();
+        }
+        if (circleCountQuick == 0) {
+            g_renderState.emptyStreak++;
+            // Invalidate the cached hash so when circles return we re-rasterize.
+            g_renderState.lastSceneHashValid = false;
+            if (g_renderState.emptyStreak >= 2) {
+                // Skip render + skip quad submission entirely.
+                if (g_nextEndFrame) {
+                    return g_nextEndFrame(session, frameEndInfo);
+                }
+                return XR_SUCCESS;
+            }
+            // First empty frame: still render once to clear stale pixels.
+        } else {
+            g_renderState.emptyStreak = 0;
+        }
+
         // Render text to swapchain
         RenderTextToTexture();
         
@@ -762,6 +935,15 @@ XrResult XRAPI_CALL Hook_xrGetInstanceProcAddr(XrInstance instance, const char* 
         return XR_SUCCESS;
     }
     
+    if (strcmp(name, "xrLocateViews") == 0) {
+        LogMessage("Intercepting xrLocateViews");
+        if (g_nextGetInstanceProcAddr) {
+            g_nextGetInstanceProcAddr(instance, name, reinterpret_cast<PFN_xrVoidFunction*>(&g_nextLocateViews));
+        }
+        *function = reinterpret_cast<PFN_xrVoidFunction>(Hook_xrLocateViews);
+        return XR_SUCCESS;
+    }
+    
     // Also get swapchain functions we need
     if (strcmp(name, "xrCreateSwapchain") == 0) {
         if (g_nextGetInstanceProcAddr) {
@@ -854,6 +1036,12 @@ extern "C" {
         XrNegotiateApiLayerRequest* apiLayerRequest) {
         
         LogFormat("xrNegotiateLoaderApiLayerInterface: layer=%s", layerName);
+        
+        // Check if this is a DCS process - bail out early for other VR apps
+        if (!IsDcsHostProcess()) {
+            LogMessage("Not a DCS process - layer will not activate");
+            return XR_ERROR_INITIALIZATION_FAILED;
+        }
         
         // Validate loader info
         if (!loaderInfo || loaderInfo->structType != XR_LOADER_INTERFACE_STRUCT_LOADER_INFO ||

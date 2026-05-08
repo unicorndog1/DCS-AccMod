@@ -13,8 +13,8 @@ Purpose: provide a single, repo-local context pack for any new coding agent/chat
 
 - Runtime behavior and architecture references in this folder are derived from:
   - `Mods/Services/DCS-AccWidg/Scripts/DCS-SRS-AccMod.lua`
-  - `claude.md`
-  - Existing docs in the repository root
+  - `docs/internal/claude.md`
+  - Existing docs in `docs/`
   - Legacy memory notes copied into `memory/migrated/`
 
 ## Maintenance Rules

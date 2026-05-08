@@ -1,0 +1,572 @@
+dialog = {
+    ["children"] = {
+        ["Box"] = {
+            ["children"] = {
+                ["panelTabs"] = {
+                    ["children"] = {
+                        ["tabAccessibility"] = {
+                            ["params"] = {
+                                ["bounds"] = {
+                                    ["h"] = 24,
+                                    ["w"] = 64,
+                                    ["x"] = 0,
+                                    ["y"] = 0,
+                                },
+                                ["enabled"] = true,
+                                ["state"] = true,
+                                ["text"] = "Panels",
+                                ["tooltip"] = "Panels",
+                                ["visible"] = true,
+                                ["zindex"] = 0,
+                            },
+                            ["skin"] = {
+                                ["params"] = {
+                                    ["minSize"] = {
+                                        ["horz"] = 120,
+                                        ["vert"] = 24,
+                                    },
+                                    ["name"] = "switchButton_ME",
+                                },
+                            },
+                            ["type"] = "TabGroupItem",
+                        },
+                        ["tabLabels"] = {
+                            ["params"] = {
+                                ["bounds"] = {
+                                    ["h"] = 24,
+                                    ["w"] = 64,
+                                    ["x"] = 128,
+                                    ["y"] = 0,
+                                },
+                                ["enabled"] = true,
+                                ["state"] = false,
+                                ["text"] = "Labels",
+                                ["tooltip"] = "Labels",
+                                ["visible"] = true,
+                                ["zindex"] = 0,
+                            },
+                            ["skin"] = {
+                                ["params"] = {
+                                    ["minSize"] = {
+                                        ["horz"] = 90,
+                                        ["vert"] = 24,
+                                    },
+                                    ["name"] = "switchButton_ME",
+                                },
+                            },
+                            ["type"] = "TabGroupItem",
+                        },
+                        ["tabKeybinds"] = {
+                            ["params"] = {
+                                ["bounds"] = {
+                                    ["h"] = 24,
+                                    ["w"] = 64,
+                                    ["x"] = 192,
+                                    ["y"] = 0,
+                                },
+                                ["enabled"] = true,
+                                ["state"] = false,
+                                ["text"] = "Keybinds",
+                                ["tooltip"] = "Keybinds",
+                                ["visible"] = true,
+                                ["zindex"] = 0,
+                            },
+                            ["skin"] = {
+                                ["params"] = {
+                                    ["minSize"] = {
+                                        ["horz"] = 90,
+                                        ["vert"] = 24,
+                                    },
+                                    ["name"] = "switchButton_ME",
+                                },
+                            },
+                            ["type"] = "TabGroupItem",
+                        },
+                        ["tabTools"] = {
+                            ["params"] = {
+                                ["bounds"] = {
+                                    ["h"] = 24,
+                                    ["w"] = 64,
+                                    ["x"] = 64,
+                                    ["y"] = 0,
+                                },
+                                ["enabled"] = true,
+                                ["state"] = false,
+                                ["text"] = "Tools",
+                                ["tooltip"] = "Tools",
+                                ["visible"] = true,
+                                ["zindex"] = 0,
+                            },
+                            ["skin"] = {
+                                ["params"] = {
+                                    ["minSize"] = {
+                                        ["horz"] = 120,
+                                        ["vert"] = 24,
+                                    },
+                                    ["name"] = "switchButton_ME",
+                                },
+                            },
+                            ["type"] = "TabGroupItem",
+                        },
+                        ["tabUnitPlacer"] = {
+                            ["params"] = {
+                                ["bounds"] = {
+                                    ["h"] = 24,
+                                    ["w"] = 64,
+                                    ["x"] = 256,
+                                    ["y"] = 0,
+                                },
+                                ["enabled"] = true,
+                                ["state"] = false,
+                                ["text"] = "Placer",
+                                ["tooltip"] = "Unit Placer",
+                                ["visible"] = true,
+                                ["zindex"] = 0,
+                            },
+                            ["skin"] = {
+                                ["params"] = {
+                                    ["minSize"] = {
+                                        ["horz"] = 90,
+                                        ["vert"] = 24,
+                                    },
+                                    ["name"] = "switchButton_ME",
+                                },
+                            },
+                            ["type"] = "TabGroupItem",
+                        },
+                    },
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 28,
+                            ["w"] = 380,
+                            ["x"] = 10,
+                            ["y"] = 8,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "",
+                        ["tooltip"] = "",
+                        ["visible"] = true,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000000",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+                ["panelAccessibility"] = {
+                    ["children"] = {
+                    },
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 280,
+                            ["w"] = 380,
+                            ["x"] = 10,
+                            ["y"] = 40,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "",
+                        ["tooltip"] = "",
+                        ["visible"] = true,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000000",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+                ["panelLabels"] = {
+                    ["children"] = {
+                    },
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 280,
+                            ["w"] = 380,
+                            ["x"] = 10,
+                            ["y"] = 40,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "",
+                        ["tooltip"] = "",
+                        ["visible"] = false,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000000",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+                ["panelKeybinds"] = {
+                    ["children"] = {
+                    },
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 280,
+                            ["w"] = 380,
+                            ["x"] = 10,
+                            ["y"] = 40,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "",
+                        ["tooltip"] = "",
+                        ["visible"] = false,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000000",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+                ["panelTools"] = {
+                    ["children"] = {
+                    },
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 280,
+                            ["w"] = 380,
+                            ["x"] = 10,
+                            ["y"] = 40,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "",
+                        ["tooltip"] = "",
+                        ["visible"] = false,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000000",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+                ["panelUnitPlacer"] = {
+                    ["children"] = {
+                    },
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 450,
+                            ["w"] = 380,
+                            ["x"] = 10,
+                            ["y"] = 40,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "",
+                        ["tooltip"] = "",
+                        ["visible"] = false,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000000",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+            },
+            ["params"] = {
+                ["bounds"] = {
+                    [1] = {
+                        ["h"] = 520,
+                        ["w"] = 400,
+                        ["x"] = 0,
+                        ["y"] = 0,
+                    },
+                },
+                ["enabled"] = true,
+                ["text"] = "",
+                ["tooltip"] = "",
+                ["visible"] = true,
+                ["zindex"] = 0,
+            },
+            ["skin"] = {
+                ["params"] = {
+                    ["name"] = "panelSkin",
+                },
+            },
+            ["type"] = "Panel",
+        },
+        ["pNoVisible"] = {
+            ["children"] = {
+                ["eWhiteText"] = {
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 20,
+                            ["w"] = 100,
+                            ["x"] = 6,
+                            ["y"] = 389,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "Static2",
+                        ["tooltip"] = "",
+                        ["visible"] = true,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "staticSkin",
+                            ["textWrapping"] = false,
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["text"] = {
+                                        ["color"] = "0xffffffff",
+                                        ["font"] = "DejaVuLGCSansCondensed-Bold.ttf",
+                                        ["lineHeight"] = 25,
+                                        ["fontSize"] = 64,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Static",
+                },
+                ["eYellowText"] = {
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 20,
+                            ["w"] = 100,
+                            ["x"] = 24,
+                            ["y"] = 20,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "Static2",
+                        ["tooltip"] = "",
+                        ["visible"] = true,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "staticSkin",
+                            ["textWrapping"] = false,
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["text"] = {
+                                        ["color"] = "0xfbb941ff",
+                                        ["font"] = "DejaVuLGCSansCondensed-Bold.ttf",
+                                        ["lineHeight"] = 25,
+                                        ["fontSize"] = 64,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Static",
+                },
+                ["eRedText"] = {
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 20,
+                            ["w"] = 100,
+                            ["x"] = 24,
+                            ["y"] = 66,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "Static2",
+                        ["tooltip"] = "",
+                        ["visible"] = false,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "staticSkin",
+                            ["textWrapping"] = false,
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["text"] = {
+                                        ["color"] = "0xfd5151ff",
+                                        ["font"] = "DejaVuLGCSansCondensed-Bold.ttf",
+                                        ["lineHeight"] = 25,
+                                        ["fontSize"] = 64,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Static",
+                },
+                ["windowModeMin"] = {
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 36,
+                            ["w"] = 40,
+                            ["x"] = 13,
+                            ["y"] = 203,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "Panel1",
+                        ["tooltip"] = "",
+                        ["visible"] = true,
+                        ["zindex"] = 0,
+                        ["layout"] = {
+                        },
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0xffffff00",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+                ["windowModeFull"] = {
+                    ["params"] = {
+                        ["bounds"] = {
+                            ["h"] = 36,
+                            ["w"] = 40,
+                            ["x"] = 13,
+                            ["y"] = 203,
+                        },
+                        ["enabled"] = true,
+                        ["text"] = "panel0",
+                        ["tooltip"] = "",
+                        ["visible"] = true,
+                        ["zindex"] = 0,
+                    },
+                    ["skin"] = {
+                        ["params"] = {
+                            ["name"] = "panelSkin",
+                        },
+                        ["states"] = {
+                            ["released"] = {
+                                [1] = {
+                                    ["bkg"] = {
+                                        ["center_center"] = "0x00000064",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    ["type"] = "Panel",
+                },
+            },
+            ["params"] = {
+                ["bounds"] = {
+                    ["h"] = 435,
+                    ["w"] = 248,
+                    ["x"] = 442,
+                    ["y"] = 31,
+                },
+                ["enabled"] = true,
+                ["text"] = "panel0",
+                ["tooltip"] = "",
+                ["visible"] = false,
+                ["zindex"] = 0,
+            },
+            ["skin"] = {
+                ["params"] = {
+                    ["name"] = "panelSkin",
+                },
+            },
+            ["type"] = "Panel",
+        },
+    },
+    ["params"] = {
+        ["bounds"] = {
+            [1] = {
+                ["h"] = 520,
+                ["w"] = 400,
+                ["x"] = 0,
+                ["y"] = 0,
+            },
+        },
+        ["draggable"] = true,
+        ["enabled"] = true,
+        ["hasCursor"] = true,
+        ["lockFlow"] = false,
+        ["modal"] = false,
+        ["offscreen"] = false,
+        ["resizable"] = false,
+        ["zOrder"] = 120,
+        ["text"] = "Accessibility Widget",
+    },
+    ["skin"] = {
+        ["params"] = {
+            ["name"] = "windowSkin",
+        },
+        ["states"] = {
+            ["released"] = {
+                [1] = {
+                    ["bkg"] = {
+                        ["center_center"] = "0x00000000",
+                    },
+                },
+            },
+        },
+    },
+    ["type"] = "Window",
+}

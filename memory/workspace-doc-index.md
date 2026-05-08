@@ -4,26 +4,26 @@ Use this as the first-pass map of existing repository documentation.
 
 ## Core Project
 
-- `README.md`: project overview, install/build, high-level feature map.
-- `SETUP.md`: general setup guidance.
-- `BUILD_GUIDE.md`: build flow details.
-- `claude.md`: practical debugging checklist for OpenXR layer path.
+- `docs/README.md`: project overview, install/build, high-level feature map.
+- `docs/setup/SETUP.md`: general setup guidance.
+- `docs/setup/BUILD_GUIDE.md`: build flow details.
+- `docs/internal/claude.md`: practical debugging checklist for OpenXR layer path.
 
 ## Mission/Gameplay Features
 
-- `DRAG_MOVE_FEATURE.md`: drag-move unit placer behavior and UX.
-- `HEADING_ROTATION_IMPLEMENTATION.md`: heading rotation implementation details.
-- `ACCJOYBRIDGE_INTEGRATION.md`: native joystick bridge integration notes.
+- `docs/features/DRAG_MOVE_FEATURE.md`: drag-move unit placer behavior and UX.
+- `docs/features/HEADING_ROTATION_IMPLEMENTATION.md`: heading rotation implementation details.
+- `docs/features/ACCJOYBRIDGE_INTEGRATION.md`: native joystick bridge integration notes.
 
 ## MFD Workstream
 
-- `MFD_RENDERING_PLAN.md`: architecture and phased plan.
-- `MFD_IMPLEMENTATION_PROGRESS.md`: current state and tracking.
-- `MFD_SETUP_GUIDE.md`: setup and operational steps.
-- `MFD_QUICK_REFERENCE.md`: short operational reference.
-- `MFD_INDEX.md`: MFD docs navigation.
-- `IMPLEMENTATION_SUMMARY.md`: completed implementation report.
-- `IMPLEMENTATION_CHECKLIST.md`: verification checklist.
+- `docs/mfd/MFD_RENDERING_PLAN.md`: architecture and phased plan.
+- `docs/mfd/MFD_IMPLEMENTATION_PROGRESS.md`: current state and tracking.
+- `docs/mfd/MFD_SETUP_GUIDE.md`: setup and operational steps.
+- `docs/mfd/MFD_QUICK_REFERENCE.md`: short operational reference.
+- `docs/mfd/MFD_INDEX.md`: MFD docs navigation.
+- `docs/mfd/IMPLEMENTATION_SUMMARY.md`: completed implementation report.
+- `docs/mfd/IMPLEMENTATION_CHECKLIST.md`: verification checklist.
 
 ## Native Components
 
@@ -35,8 +35,9 @@ Use this as the first-pass map of existing repository documentation.
 
 ## Automation Scripts
 
-- `build-all.bat`: build entrypoint.
+- `build-all.bat`: build entrypoint; also stages `release/` with prebuilt binaries and a binary-installable OpenXR layer package.
 - `deploy.bat`: deployment entrypoint.
+- `release-template/install.bat`: source-controlled one-shot release installer staged to `release/install.bat`.
 - `setup-mfd-system.ps1`: MFD setup automation.
 - `Scripts/rebuild_catalog_and_deploy.ps1`: catalog rebuild/deploy flow.
 

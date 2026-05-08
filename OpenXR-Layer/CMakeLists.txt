@@ -23,6 +23,7 @@ include_directories(${OPENXR_SDK_ROOT}/include)
 set(SOURCES
     src/main.cpp
     src/render.cpp
+    src/perf.cpp
 )
 
 # Create the DLL (API Layer)

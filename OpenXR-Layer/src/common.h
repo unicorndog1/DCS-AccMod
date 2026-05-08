@@ -70,6 +70,12 @@ struct LayerState {
     XrEyeVisibility quadEyeVisibility; // Which eye(s) see the overlay (default: BOTH)
     float quadDistance;    // Distance in world coordinates for quad positioning (from LUA)
     
+    // VR zoom detection state
+    float currentVerticalFOV;  // Current FOV in radians (angleUp - angleDown)
+    float baselineVerticalFOV; // Baseline (unzoomed) FOV in radians
+    bool fovInitialized;       // Whether baseline FOV has been captured
+    float zoomFactor;          // Current zoom: 1.0 = normal, >1.0 = zoomed in
+    
     LayerState();
 };
 
@@ -89,10 +95,17 @@ extern PFN_xrWaitSwapchainImage g_nextWaitSwapchainImage;
 extern PFN_xrReleaseSwapchainImage g_nextReleaseSwapchainImage;
 extern PFN_xrCreateReferenceSpace g_nextCreateReferenceSpace;
 extern PFN_xrDestroySpace g_nextDestroySpace;
+extern PFN_xrLocateViews g_nextLocateViews;
 
 // Logging functions (defined in main.cpp)
 void LogMessage(const char* message);
 void LogFormat(const char* format, ...);
+
+// Returns true if the current host process is DCS (DCS.exe / DCS_server.exe).
+// The OpenXR layer is implicit and gets loaded into every OpenXR app on the
+// system, so we self-disable in any other process to avoid breaking other
+// VR titles (e.g. MSFS 2024).
+bool IsDcsHostProcess();
 
 template<typename... Args>
 void LogFormat(const char* format, Args... args) {

@@ -9,10 +9,12 @@ echo This script will:
 echo   1. Build AccJoyBridge DLL
 echo   2. Build OpenXR Layer DLL
 echo   3. Deploy all files to workspace
-echo   4. Deploy all files to Saved Games
+echo   4. Stage a release package with prebuilt binaries
+echo   5. Deploy all files to Saved Games
 echo.
 
 set "ROOT_DIR=%~dp0"
+set "RELEASE_DIR=%ROOT_DIR%release"
 set "SAVED_GAMES=%USERPROFILE%\Saved Games"
 set "DCS_FOLDER=%SAVED_GAMES%\DCS"
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd-HHmmss')"') do set "BUILD_REVISION=%%I"
@@ -34,7 +36,7 @@ if /I not "%SKIP_LUA_SYNTAX_CHECK%"=="1" (
 REM =========================================
 REM Validate Lua syntax
 REM =========================================
-echo [1/5] Validating Lua syntax...
+echo [1/6] Validating Lua syntax...
 echo.
 
 if /I not "%SKIP_LUA_SYNTAX_CHECK%"=="1" (
@@ -51,7 +53,7 @@ echo.
 REM =========================================
 REM Build AccJoyBridge
 REM =========================================
-echo [2/5] Building AccJoyBridge...
+echo [2/6] Building AccJoyBridge...
 echo.
 
 cd "%ROOT_DIR%native\AccJoyBridge"
@@ -113,7 +115,7 @@ REM Deploy to Workspace
 REM =========================================
 cd "%ROOT_DIR%"
 
-echo [4/5] Deploying to workspace...
+echo [4/6] Deploying to workspace...
 echo.
 
 REM Copy AccJoyBridge.dll to workspace Mods location
@@ -144,9 +146,104 @@ echo Workspace deployment complete!
 echo.
 
 REM =========================================
+REM Stage release package
+REM =========================================
+echo [5/6] Staging release package...
+echo.
+
+set "RELEASE_MODS=%RELEASE_DIR%\Mods"
+set "RELEASE_SCRIPTS=%RELEASE_DIR%\Scripts"
+set "RELEASE_OPENXR=%RELEASE_DIR%\OpenXR-Layer"
+set "RELEASE_ACCJOY_DEST=%RELEASE_MODS%\Services\DCS-AccWidg\bin\"
+set "RELEASE_REVISION_DEST=%RELEASE_MODS%\Services\DCS-AccWidg\Scripts\BuildRevision.lua"
+set "RELEASE_ASSETS=release-template"
+
+if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%"
+if not exist "%RELEASE_OPENXR%" mkdir "%RELEASE_OPENXR%"
+
+if exist "Mods" (
+    echo   - Syncing Mods into release package...
+    robocopy "Mods" "%RELEASE_MODS%" /E /R:2 /W:1 /NFL /NDL /NJH /NJS /nc /ns /np >nul
+    if errorlevel 8 (
+        echo ERROR: Failed to stage Mods directory into release package!
+        del "%BUILD_REVISION_FILE%" >nul 2>&1
+        exit /b 1
+    )
+) else (
+    echo WARNING: Mods directory not found for release staging!
+)
+
+if exist "Scripts" (
+    echo   - Syncing Scripts into release package...
+    robocopy "Scripts" "%RELEASE_SCRIPTS%" /E /R:2 /W:1 /NFL /NDL /NJH /NJS /nc /ns /np >nul
+    if errorlevel 8 (
+        echo ERROR: Failed to stage Scripts directory into release package!
+        del "%BUILD_REVISION_FILE%" >nul 2>&1
+        exit /b 1
+    )
+) else (
+    echo WARNING: Scripts directory not found for release staging!
+)
+
+if not exist "%RELEASE_ACCJOY_DEST%" mkdir "%RELEASE_ACCJOY_DEST%"
+
+echo   - Copying AccJoyBridge.dll into release package...
+copy /Y "%ACCJOY_SOURCE%" "%RELEASE_ACCJOY_DEST%" >nul
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Failed to copy AccJoyBridge.dll into release package!
+    del "%BUILD_REVISION_FILE%" >nul 2>&1
+    exit /b 1
+)
+
+echo   - Copying OpenXR layer files into release package...
+for %%F in (
+    "DCS_AccMod_OpenXR_Layer.dll"
+    "DCS_AccMod_OpenXR_Layer.json"
+    "install.bat"
+    "uninstall.bat"
+) do (
+    copy /Y "OpenXR-Layer\%%~F" "%RELEASE_OPENXR%\%%~F" >nul
+    if errorlevel 1 (
+        echo ERROR: Failed to copy OpenXR-Layer\%%~F into release package!
+        del "%BUILD_REVISION_FILE%" >nul 2>&1
+        exit /b 1
+    )
+)
+
+if exist "%RELEASE_ASSETS%" (
+    echo   - Copying release installer assets...
+    for %%F in (
+        "install.bat"
+        "README.md"
+    ) do (
+        copy /Y "%RELEASE_ASSETS%\%%~F" "%RELEASE_DIR%\%%~F" >nul
+        if errorlevel 1 (
+            echo ERROR: Failed to copy %RELEASE_ASSETS%\%%~F into release package!
+            del "%BUILD_REVISION_FILE%" >nul 2>&1
+            exit /b 1
+        )
+    )
+) else (
+    echo ERROR: Release asset directory %RELEASE_ASSETS% not found!
+    del "%BUILD_REVISION_FILE%" >nul 2>&1
+    exit /b 1
+)
+
+echo   - Writing build revision into release package...
+copy /Y "%BUILD_REVISION_FILE%" "%RELEASE_REVISION_DEST%" >nul
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Failed to write build revision into release package!
+    del "%BUILD_REVISION_FILE%" >nul 2>&1
+    exit /b 1
+)
+
+echo Release package staged at %RELEASE_DIR%
+echo.
+
+REM =========================================
 REM Deploy to Saved Games
 REM =========================================
-echo [5/5] Deploying to Saved Games (%DCS_FOLDER%)...
+echo [6/6] Deploying to Saved Games (%DCS_FOLDER%)...
 echo.
 
 if not exist "%DCS_FOLDER%" (
@@ -211,13 +308,21 @@ echo Deployed to workspace:
 echo   - %ROOT_DIR%Mods\Services\DCS-AccWidg\bin\AccJoyBridge.dll
 echo   - %ROOT_DIR%OpenXR-Layer\DCS_AccMod_OpenXR_Layer.dll
 echo.
+echo Staged release package:
+echo   - %RELEASE_DIR%\install.bat
+echo   - %RELEASE_DIR%\README.md
+echo   - %RELEASE_DIR%Mods\
+echo   - %RELEASE_DIR%Scripts\
+echo   - %RELEASE_DIR%OpenXR-Layer\install.bat
+echo   - %RELEASE_DIR%OpenXR-Layer\DCS_AccMod_OpenXR_Layer.dll
+echo.
 echo Deployed to Saved Games:
 echo   - %DCS_FOLDER%\Mods\
 echo   - %DCS_FOLDER%\Scripts\
 echo   - %DCS_FOLDER%\Mods\Services\DCS-AccWidg\bin\AccJoyBridge.dll
 echo.
 echo Next steps:
-echo   1. Run OpenXR-Layer\install.bat as Administrator (one-time setup)
+echo   1. Run release\install.bat as Administrator for the staged binary package
 echo   2. Launch DCS and test the mod
 echo.
 

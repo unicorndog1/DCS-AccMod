@@ -371,6 +371,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   <ItemGroup>
     <ClCompile Include="C:\HELL\CODE\DCS-AccMod\OpenXR-Layer\src\main.cpp" />
     <ClCompile Include="C:\HELL\CODE\DCS-AccMod\OpenXR-Layer\src\render.cpp" />
+    <ClCompile Include="C:\HELL\CODE\DCS-AccMod\OpenXR-Layer\src\perf.cpp" />
   </ItemGroup>
   <ItemGroup />
   <ItemGroup>

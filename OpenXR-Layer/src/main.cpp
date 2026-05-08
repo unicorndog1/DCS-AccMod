@@ -2,6 +2,7 @@
 // Handles UDP communication and layer lifecycle
 
 #include "common.h"
+#include "perf.h"
 #include <cstdio>
 #include <cstring>
 #include <share.h>
@@ -42,6 +43,35 @@ void LogFormat(const char* format, ...) {
     }
 }
 
+// Check if the current host process is DCS
+bool IsDcsHostProcess() {
+    char exePath[MAX_PATH];
+    DWORD length = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    
+    if (length == 0 || length == MAX_PATH) {
+        LogMessage("WARNING: Failed to get module file name");
+        return false;
+    }
+    
+    // Convert to lowercase for case-insensitive comparison
+    for (DWORD i = 0; i < length; i++) {
+        exePath[i] = static_cast<char>(tolower(exePath[i]));
+    }
+    
+    // Check if the executable name contains "dcs.exe" or "dcs_server.exe"
+    const char* exeName = strrchr(exePath, '\\');
+    if (!exeName) {
+        exeName = exePath; // No backslash found, use whole path
+    } else {
+        exeName++; // Skip the backslash
+    }
+    
+    bool isDcs = (strcmp(exeName, "dcs.exe") == 0 || strcmp(exeName, "dcs_server.exe") == 0);
+    
+    LogFormat("Host process: %s (DCS: %s)", exeName, isDcs ? "YES" : "NO");
+    return isDcs;
+}
+
 // Global layer state
 LayerState g_state;
 
@@ -58,6 +88,7 @@ PFN_xrWaitSwapchainImage g_nextWaitSwapchainImage = nullptr;
 PFN_xrReleaseSwapchainImage g_nextReleaseSwapchainImage = nullptr;
 PFN_xrCreateReferenceSpace g_nextCreateReferenceSpace = nullptr;
 PFN_xrDestroySpace g_nextDestroySpace = nullptr;
+PFN_xrLocateViews g_nextLocateViews = nullptr;
 
 // Constructor for LayerState
 LayerState::LayerState() {
@@ -70,6 +101,10 @@ LayerState::LayerState() {
     quadAspect = 1.778f;    // default: 16:9
     quadEyeVisibility = XR_EYE_VISIBILITY_BOTH;
     quadDistance = 1.0f;    // default: 1 meter
+    currentVerticalFOV = 0.0f;
+    baselineVerticalFOV = 0.0f;
+    fovInitialized = false;
+    zoomFactor = 1.0f;
 }
 
 // UDP receiver thread
@@ -90,14 +125,19 @@ DWORD WINAPI UDPReceiverThread(LPVOID param) {
         if (result > 0) {
             int bytesRead = recv(g_state.udpSocket, buffer, sizeof(buffer) - 1, 0);
             if (bytesRead > 0) {
+                int64_t iterStart = perf::Now();
                 buffer[bytesRead] = '\0';
                 
                 // Parse UDP packet
                 // Format: "C,x,y,radius,r,g,b,a,filled" for circle
                 //         "A" to clear all circles
                 //         "U,x,y,radius,r,g,b,a,filled" to update/add
+                //         "P" to dump a perf snapshot now
                 
-                if (buffer[0] == 'A') {
+                if (buffer[0] == 'P') {
+                    perf::DumpSnapshot("udp-P");
+                }
+                else if (buffer[0] == 'A') {
                     // Clear all circles
                     CriticalSectionLock lock(g_state.circlesMutex);
                     g_state.circles.clear();
@@ -248,6 +288,7 @@ DWORD WINAPI UDPReceiverThread(LPVOID param) {
                                  circle.x, circle.y, circle.radius, circle.a, filled, circle.thickness, circle.label);
                     }
                 }
+                perf::RecordDuration(perf::K_udpRecvIter, iterStart);
             }
         }
     }
@@ -327,10 +368,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         LogMessage("=== DCS AccMod OpenXR Layer Loaded ===");
+        perf::Init();
+        perf::EmitBuildBanner();
+        // Phase 1: zero-circle fast path + scene-hash dirty flag enabled.
+        perf::EmitToggles(/*useGpuRasterizer*/0, /*dirtyFlag*/1,
+                          /*swapW*/2048, /*swapH*/1024, /*mapDiscard*/1);
         InitializeUDP();
         break;
         
     case DLL_PROCESS_DETACH:
+        perf::Shutdown();
         ShutdownUDP();
         DeleteCriticalSection(&g_state.circlesMutex);
         LogMessage("=== DCS AccMod OpenXR Layer Unloaded ===");
